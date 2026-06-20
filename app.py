@@ -158,6 +158,174 @@ CYCLE_CONFIGS = {
 }
 
 
+WIZARD_SCENARIOS = {
+    'thermal_power': {
+        'name': '火力发电',
+        'icon': '🏭',
+        'description': '以Rankine循环为基础，适用于燃煤/燃气电站的热力系统设计与效率分析。',
+        'cycle_type': 'rankine_basic',
+        'color': '#e74c3c',
+        'inputs': [
+            {'key': 'rated_power', 'label': '额定功率', 'unit': 'MW', 'min': 10, 'max': 1000, 'step': 10, 'default': 300,
+             'hint': '10~1000 MW'},
+            {'key': 'main_steam_temp', 'label': '主蒸汽温度', 'unit': '°C', 'min': 400, 'max': 650, 'step': 10, 'default': 540,
+             'hint': '400~650 °C'},
+        ],
+        'recommend': lambda inputs: {
+            'P_boiler': {
+                'value': 10 if inputs.get('rated_power', 300) < 100 else (15 if inputs.get('rated_power', 300) <= 300 else 20),
+                'reason': '根据额定功率等级推算：<100MW取10MPa, 100~300MW取15MPa, >300MW取20MPa'
+            },
+            'T_boiler': {
+                'value': inputs.get('main_steam_temp', 540),
+                'reason': '直接采用用户输入的主蒸汽温度'
+            },
+            'P_cond': {
+                'value': 0.008,
+                'reason': '凝汽式汽轮机典型冷凝器压力0.008MPa（约41°C饱和温度）'
+            },
+            'eta_pump': {
+                'value': 0.85,
+                'reason': '工业给水泵典型等熵效率取值0.85'
+            },
+            'eta_turbine': {
+                'value': 0.88,
+                'reason': '大型凝汽式汽轮机典型相对内效率取值0.88'
+            },
+        },
+    },
+    'gas_turbine': {
+        'name': '燃气轮机发电',
+        'icon': '🔥',
+        'description': '以Brayton循环为基础，适用于燃气轮机、航改型燃气轮机发电系统分析。',
+        'cycle_type': 'brayton_basic',
+        'color': '#f39c12',
+        'inputs': [
+            {'key': 'pressure_ratio', 'label': '压比', 'unit': '', 'min': 5, 'max': 40, 'step': 1, 'default': 15,
+             'hint': '5~40'},
+            {'key': 'turbine_inlet_temp', 'label': '涡轮进口温度(TIT)', 'unit': '°C', 'min': 800, 'max': 1500, 'step': 20, 'default': 1200,
+             'hint': '800~1500 °C'},
+        ],
+        'recommend': lambda inputs: {
+            'rp': {
+                'value': inputs.get('pressure_ratio', 15),
+                'reason': '直接采用用户输入的压比'
+            },
+            'T3': {
+                'value': inputs.get('turbine_inlet_temp', 1200),
+                'reason': '直接采用用户输入的涡轮进口温度'
+            },
+            'P1': {
+                'value': 0.1,
+                'reason': '标准大气压入口压力0.1MPa'
+            },
+            'T1': {
+                'value': 25,
+                'reason': '环境温度取25°C（ISO标准工况）'
+            },
+            'eta_compressor': {
+                'value': 0.85,
+                'reason': '工业燃气轮机压气机典型等熵效率0.85'
+            },
+            'eta_turbine': {
+                'value': 0.90,
+                'reason': '燃气涡轮典型等熵效率0.90'
+            },
+        },
+    },
+    'automotive': {
+        'name': '汽车发动机',
+        'icon': '🚗',
+        'description': '基于Otto/Diesel循环，适用于车用汽油机/柴油机的循环效率与性能分析。',
+        'cycle_type': 'otto',
+        'color': '#3498db',
+        'inputs': [
+            {'key': 'engine_speed', 'label': '转速', 'unit': 'rpm', 'min': 800, 'max': 8000, 'step': 100, 'default': 3000,
+             'hint': '800~8000 rpm'},
+            {'key': 'compression_ratio', 'label': '压缩比', 'unit': '', 'min': 6, 'max': 22, 'step': 0.5, 'default': 10,
+             'hint': '汽油6~12, 柴油14~22'},
+        ],
+        'recommend': lambda inputs: {
+            'r': {
+                'value': inputs.get('compression_ratio', 10),
+                'reason': '直接采用用户输入的压缩比'
+            },
+            'q_in': {
+                'value': 1800 if inputs.get('compression_ratio', 10) < 14 else 1600,
+                'reason': '汽油机加热量约1800kJ/kg，柴油机约1600kJ/kg（根据压缩比区分）'
+            },
+            'T1': {
+                'value': 25,
+                'reason': '进气温度取25°C（标准工况）'
+            },
+            'P1': {
+                'value': 0.1,
+                'reason': '自然吸气入口压力0.1MPa'
+            },
+            'eta_compression': {
+                'value': 0.90,
+                'reason': '典型压缩过程效率0.90'
+            },
+            'eta_expansion': {
+                'value': 0.90,
+                'reason': '典型膨胀过程效率0.90'
+            },
+        },
+    },
+    'waste_heat': {
+        'name': '余热回收',
+        'icon': '♻️',
+        'description': '燃气-蒸汽联合循环(CCGT)，充分利用燃气排气余热产生蒸汽，适用于高效热电联产。',
+        'cycle_type': 'ccgt',
+        'color': '#27ae60',
+        'inputs': [
+            {'key': 'exhaust_temp', 'label': '排气温度', 'unit': '°C', 'min': 400, 'max': 700, 'step': 10, 'default': 550,
+             'hint': '400~700 °C'},
+            {'key': 'exhaust_flow', 'label': '排气流量', 'unit': 'kg/s', 'min': 10, 'max': 500, 'step': 5, 'default': 100,
+             'hint': '10~500 kg/s'},
+        ],
+        'recommend': lambda inputs: {
+            'rp': {
+                'value': 14,
+                'reason': '联合循环燃气轮机典型压比14'
+            },
+            'TIT': {
+                'value': max(800, inputs.get('exhaust_temp', 550) + 700),
+                'reason': '根据排气温度反推TIT：TIT ≈ 排气温度+700°C（根据压比修正）'
+            },
+            'P_steam': {
+                'value': 10 if inputs.get('exhaust_temp', 550) < 500 else (12 if inputs.get('exhaust_temp', 550) < 600 else 16),
+                'reason': '根据排气温度取蒸汽压力：<500°C取10MPa, 500~600°C取12MPa, >600°C取16MPa'
+            },
+            'T_steam': {
+                'value': min(600, inputs.get('exhaust_temp', 550) - 30),
+                'reason': '主蒸汽温度约比排气温度低30°C（节点温差），不超过600°C'
+            },
+            'P_cond': {
+                'value': 0.008,
+                'reason': '典型冷凝器压力0.008MPa'
+            },
+            'eta_compressor': {
+                'value': 0.88,
+                'reason': '大型燃气轮机压气机效率0.88'
+            },
+            'eta_turbine_gas': {
+                'value': 0.92,
+                'reason': '燃气涡轮效率0.92'
+            },
+            'eta_turbine_steam': {
+                'value': 0.90,
+                'reason': '蒸汽轮机效率0.90'
+            },
+            'eta_pump': {
+                'value': 0.85,
+                'reason': '给水泵效率0.85'
+            },
+        },
+    },
+}
+
+
 def build_cycle(cfg_key, param_values):
     """根据配置和参数值构建循环对象并计算"""
     cfg = CYCLE_CONFIGS[cfg_key]
@@ -421,6 +589,10 @@ app.layout = html.Div([
                        style={'padding': 10, 'fontWeight': 'bold',
                               'background': 'linear-gradient(135deg, #fcf3cf, #fadbd8)',
                               'color': '#935116'}),
+                dcc.Tab(label='🧭 循环设计向导', value='tab-wizard',
+                       style={'padding': 10, 'fontWeight': 'bold',
+                              'background': 'linear-gradient(135deg, #d5f5e3, #d1f2eb)',
+                              'color': '#117864'}),
             ], style={'marginBottom': 12}),
             
             html.Div(id='tab-content'),
@@ -451,6 +623,78 @@ app.layout = html.Div([
     dcc.Store(id='optimize-history-selection', data=[]),
     # 对比结果存储
     dcc.Store(id='optimize-compare-store', data=None),
+    # 向导状态存储
+    dcc.Store(id='wizard-step-store', data=1),
+    dcc.Store(id='wizard-data-store', data={
+        'scenario': None,
+        'scenario_inputs': {},
+        'recommended_params': {},
+        'cycle_type': None,
+    }),
+    dcc.Store(id='wizard-result-store', data=None),
+    dcc.Store(id='wizard-apply-store', data=False),
+    
+    # 隐藏的占位符组件 - Dash要求回调引用的组件必须存在于初始layout中
+    html.Div([
+        # 向导按钮占位符
+        html.Button('', id='wizard-btn-next-1', n_clicks=0, style={'display': 'none'}),
+        html.Button('', id='wizard-btn-next-2', n_clicks=0, style={'display': 'none'}),
+        html.Button('', id='wizard-btn-next-3', n_clicks=0, style={'display': 'none'}),
+        html.Button('', id='wizard-btn-prev-2', n_clicks=0, style={'display': 'none'}),
+        html.Button('', id='wizard-btn-prev-3', n_clicks=0, style={'display': 'none'}),
+        html.Button('', id='wizard-btn-prev-4', n_clicks=0, style={'display': 'none'}),
+        html.Button('', id='wizard-btn-compute', n_clicks=0, style={'display': 'none'}),
+        html.Button('', id='wizard-btn-recompute', n_clicks=0, style={'display': 'none'}),
+        html.Button('', id='wizard-btn-apply', n_clicks=0, style={'display': 'none'}),
+        html.Button('', id='wizard-btn-save-case', n_clicks=0, style={'display': 'none'}),
+        # 向导状态显示占位符
+        html.Div('', id='wizard-apply-status', style={'display': 'none'}),
+        # Pattern-Matching组件 - 场景卡片 (至少需要一个)
+        html.Div('', id={'type': 'wizard-scenario-card', 'index': 'placeholder'},
+                 style={'display': 'none'}),
+        # Pattern-Matching组件 - 场景输入 (至少需要一个)
+        dcc.Input(id={'type': 'wizard-scenario-input', 'index': 'placeholder'},
+                  style={'display': 'none'}),
+        # Pattern-Matching组件 - 推荐参数输入 (至少需要一个)
+        dcc.Input(id={'type': 'wizard-rec-input', 'index': 'placeholder'},
+                  style={'display': 'none'}),
+        # 优化Tab组件占位符
+        dcc.Dropdown(id='opt-cycle-type', style={'display': 'none'}),
+        dcc.RadioItems(id='opt-objective', style={'display': 'none'}),
+        html.Div('', id='opt-param-configs', style={'display': 'none'}),
+        dcc.Input(id='opt-pop-size', style={'display': 'none'}),
+        dcc.Input(id='opt-n-gen', style={'display': 'none'}),
+        dcc.Input(id='opt-cx-rate', style={'display': 'none'}),
+        dcc.Input(id='opt-mut-rate', style={'display': 'none'}),
+        html.Div('', id='opt-progress-panel', style={'display': 'none'}),
+        html.Div('', id='opt-save-status', style={'display': 'none'}),
+        html.Div('', id='opt-compare-panel', style={'display': 'none'}),
+        html.Div('', id='opt-history-compare-status', style={'display': 'none'}),
+        html.Div('', id='opt-history-list', style={'display': 'none'}),
+        html.Div('', id='opt-results-section', style={'display': 'none'}),
+        html.Div('', id='opt-loading-icon', style={'display': 'none'}),
+        dcc.Graph(id='opt-conv-figure', style={'display': 'none'}),
+        dcc.Graph(id='opt-feasibility-figure', style={'display': 'none'}),
+        dcc.Graph(id='opt-constraint-figure', style={'display': 'none'}),
+        dcc.Graph(id='opt-best-ts', style={'display': 'none'}),
+        html.Div('', id='opt-results-wrapper', style={'display': 'none'}),
+        html.Button('', id='btn-save-opt-case', style={'display': 'none'}),
+        html.Button('', id='btn-opt-history-back', style={'display': 'none'}),
+        html.Button('', id='btn-opt-history-compare', style={'display': 'none'}),
+        # 优化Tab Pattern-Matching组件
+        dcc.Checklist(id={'type': 'opt-param-enable', 'index': 'placeholder'},
+                      style={'display': 'none'}),
+        dcc.Input(id={'type': 'opt-param-min', 'index': 'placeholder'},
+                  style={'display': 'none'}),
+        dcc.Input(id={'type': 'opt-param-max', 'index': 'placeholder'},
+                  style={'display': 'none'}),
+        dcc.Checklist(id={'type': 'opt-hist-checkbox', 'index': 'placeholder'},
+                      style={'display': 'none'}),
+        html.Button('', id={'type': 'opt-hist-load', 'index': 'placeholder'},
+                    style={'display': 'none'}),
+        html.Button('', id={'type': 'opt-hist-delete', 'index': 'placeholder'},
+                    style={'display': 'none'}),
+    ], style={'display': 'none'}),
     
 ], style={'fontFamily': 'PingFang SC, Microsoft YaHei, Arial, sans-serif'})
 
@@ -594,10 +838,14 @@ def _make_serializable(obj):
                Input('optimize-progress-store', 'data'),
                Input('optimize-history-store', 'data'),
                Input('optimize-history-current-id', 'data'),
-               Input('optimize-compare-store', 'data')])
+               Input('optimize-compare-store', 'data'),
+               Input('wizard-step-store', 'data'),
+               Input('wizard-data-store', 'data'),
+               Input('wizard-result-store', 'data')])
 def render_tab(tab, store_data, diagram_type, compare_result,
                opt_result, opt_progress, opt_history, opt_history_current,
-               opt_compare):
+               opt_compare,
+               wizard_step, wizard_data, wizard_result):
     # ====== 优化求解器Tab (独立处理) ======
     if tab == 'tab-optimize':
         return _render_optimize_tab(opt_result, opt_progress, opt_history,
@@ -638,6 +886,10 @@ def render_tab(tab, store_data, diagram_type, compare_result,
             return _render_compare_sensitivity(cases, compare_result)
         else:
             return html.Div('未知对比模式')
+    
+    # ====== 循环设计向导Tab ======
+    if tab == 'tab-wizard':
+        return _render_wizard_tab(wizard_step, wizard_data, wizard_result)
     
     # ====== 其他Tab ======
     if not store_data:
@@ -3883,6 +4135,844 @@ def _compare_opt_history(compare_clicks, history, selection):
 
 
 # ---- 7. 清除对比结果 (可选: 不单独做按钮，切换历史时自动) ----
+
+
+# ============================================================
+# 循环设计向导 - 渲染函数
+# ============================================================
+
+def _render_wizard_tab(step, wizard_data, wizard_result):
+    """向导Tab主渲染函数"""
+    step = step or 1
+    wizard_data = wizard_data or {
+        'scenario': None,
+        'scenario_inputs': {},
+        'recommended_params': {},
+        'cycle_type': None,
+    }
+    
+    return html.Div([
+        html.H3('🧭 循环设计向导',
+                style={'marginTop': 0, 'color': '#117864',
+                       'borderBottom': '2px solid #1abc9c',
+                       'paddingBottom': 10}),
+        
+        html.Div([
+            html.Span('💡 通过4步问答式交互，快速生成可直接计算的循环配置方案',
+                     style={'background': '#eafaf1', 'padding': '8px 14px',
+                            'borderRadius': 6, 'fontSize': 13, 'color': '#0e6655'}),
+        ], style={'marginBottom': 20}),
+        
+        # 步骤指示器
+        _render_wizard_progress(step),
+        
+        # 步骤卡片
+        html.Div([
+            _render_wizard_step_1(wizard_data, step),
+            _render_wizard_step_2(wizard_data, step),
+            _render_wizard_step_3(wizard_data, step),
+            _render_wizard_step_4(wizard_data, step, wizard_result),
+        ], style={'marginTop': 16}),
+        
+    ], style={'padding': 4})
+
+
+def _render_wizard_progress(current_step):
+    """渲染步骤进度条"""
+    steps = [
+        (1, '选择应用场景'),
+        (2, '设定工况条件'),
+        (3, '智能推荐参数'),
+        (4, '确认并计算'),
+    ]
+    
+    children = []
+    for i, (num, label) in enumerate(steps):
+        is_done = num < current_step
+        is_active = num == current_step
+        
+        if is_done:
+            bg = '#27ae60'
+            color = 'white'
+            border = '#27ae60'
+        elif is_active:
+            bg = '#1abc9c'
+            color = 'white'
+            border = '#1abc9c'
+        else:
+            bg = '#ecf0f1'
+            color = '#7f8c8d'
+            border = '#bdc3c7'
+        
+        circle = html.Div([
+            html.Span('✓' if is_done else str(num),
+                     style={'fontSize': 14, 'fontWeight': 'bold'}),
+        ], style={
+            'width': 32, 'height': 32, 'borderRadius': '50%',
+            'background': bg, 'color': color,
+            'display': 'flex', 'alignItems': 'center', 'justifyContent': 'center',
+            'border': f'2px solid {border}',
+            'flexShrink': 0,
+        })
+        
+        label_div = html.Div(label, style={
+            'fontSize': 12,
+            'fontWeight': 'bold' if is_active else 'normal',
+            'color': '#2c3e50' if (is_active or is_done) else '#95a5a6',
+            'marginTop': 4,
+            'whiteSpace': 'nowrap',
+        })
+        
+        step_div = html.Div([
+            circle,
+            label_div,
+        ], style={
+            'display': 'flex', 'flexDirection': 'column',
+            'alignItems': 'center', 'flex': 1 if i < len(steps) - 1 else 'none',
+            'position': 'relative',
+        })
+        
+        children.append(step_div)
+        
+        # 连接线
+        if i < len(steps) - 1:
+            line_color = '#27ae60' if is_done else '#d5dbdb'
+            children.append(html.Div(style={
+                'flex': 1,
+                'height': 3,
+                'background': line_color,
+                'alignSelf': 'center',
+                'marginTop': -16,
+            }))
+    
+    return html.Div(children, style={
+        'display': 'flex',
+        'alignItems': 'flex-start',
+        'padding': '16px 24px',
+        'background': '#f8f9fa',
+        'borderRadius': 8,
+        'marginBottom': 16,
+    })
+
+
+def _wizard_card_style(is_active, is_done):
+    """步骤卡片样式"""
+    if is_done:
+        return {
+            'border': '2px solid #27ae60',
+            'borderRadius': 10,
+            'padding': 18,
+            'marginBottom': 14,
+            'background': '#eafaf1',
+        }
+    elif is_active:
+        return {
+            'border': '2px solid #1abc9c',
+            'borderRadius': 10,
+            'padding': 18,
+            'marginBottom': 14,
+            'background': 'white',
+            'boxShadow': '0 4px 12px rgba(26, 188, 156, 0.15)',
+        }
+    else:
+        return {
+            'border': '1px solid #d5dbdb',
+            'borderRadius': 10,
+            'padding': 18,
+            'marginBottom': 14,
+            'background': '#fafafa',
+            'opacity': 0.7,
+        }
+
+
+def _render_wizard_step_1(wizard_data, current_step):
+    """第一步: 选择应用场景"""
+    is_active = current_step == 1
+    is_done = current_step > 1
+    
+    selected_scenario = wizard_data.get('scenario')
+    
+    children = [
+        html.Div([
+            html.H4('1️⃣ 选择应用场景', style={'margin': 0, 'color': '#117864'}),
+            html.Div('选择与您工程最匹配的应用类型，系统将自动确定循环类型',
+                    style={'fontSize': 12, 'color': '#7f8c8d', 'marginTop': 4}),
+        ], style={'marginBottom': 14}),
+    ]
+    
+    if is_active or is_done:
+        cards = []
+        for sc_key, sc_cfg in WIZARD_SCENARIOS.items():
+            is_selected = selected_scenario == sc_key
+            card_style = {
+                'flex': 1,
+                'padding': 16,
+                'borderRadius': 10,
+                'cursor': 'pointer',
+                'border': f'3px solid {sc_cfg["color"]}' if is_selected else '2px solid #ecf0f1',
+                'background': f'{sc_cfg["color"]}10' if is_selected else 'white',
+                'transition': 'all 0.2s',
+                'minWidth': 0,
+            }
+            
+            cards.append(html.Div([
+                html.Div(sc_cfg['icon'], style={'fontSize': 36, 'textAlign': 'center', 'marginBottom': 8}),
+                html.Div(sc_cfg['name'], style={
+                    'fontSize': 16, 'fontWeight': 'bold',
+                    'textAlign': 'center', 'color': sc_cfg['color'],
+                    'marginBottom': 6,
+                }),
+                html.Div(sc_cfg['description'], style={
+                    'fontSize': 11, 'color': '#566573',
+                    'textAlign': 'center', 'lineHeight': 1.5,
+                }),
+            ], id={'type': 'wizard-scenario-card', 'index': sc_key},
+               n_clicks=0, style=card_style))
+        
+        children.append(html.Div(cards, style={'display': 'flex', 'gap': 14}))
+        
+        if selected_scenario:
+            sc = WIZARD_SCENARIOS[selected_scenario]
+            children.append(html.Div([
+                html.Span(f'✅ 已选择: ', style={'fontWeight': 'bold', 'color': '#27ae60'}),
+                html.Span(sc['name'], style={'fontWeight': 'bold', 'color': sc['color']}),
+                html.Span(f' → 对应循环: {CYCLE_CONFIGS[sc["cycle_type"]]["name"]}',
+                         style={'color': '#566573', 'marginLeft': 8}),
+            ], style={'marginTop': 14, 'padding': 10, 'background': '#eaf2f8',
+                     'borderRadius': 6, 'fontSize': 13}))
+            
+            children.append(html.Div([
+                html.Button('下一步: 设定工况条件 →', id='wizard-btn-next-1', n_clicks=0,
+                           style={'background': '#1abc9c', 'color': 'white',
+                                  'border': 'none', 'padding': '10px 22px',
+                                  'borderRadius': 6, 'fontSize': 14,
+                                  'fontWeight': 'bold', 'cursor': 'pointer',
+                                  'float': 'right'}),
+            ], style={'marginTop': 14, 'overflow': 'hidden'}))
+    
+    return html.Div(children, style=_wizard_card_style(is_active, is_done))
+
+
+def _render_wizard_step_2(wizard_data, current_step):
+    """第二步: 设定工况条件"""
+    is_active = current_step == 2
+    is_done = current_step > 2
+    
+    selected_scenario = wizard_data.get('scenario')
+    scenario_inputs = wizard_data.get('scenario_inputs', {})
+    
+    children = [
+        html.Div([
+            html.H4('2️⃣ 设定工况条件', style={'margin': 0, 'color': '#117864'}),
+            html.Div('请输入关键工况参数，系统将基于工程经验推荐其余参数',
+                    style={'fontSize': 12, 'color': '#7f8c8d', 'marginTop': 4}),
+        ], style={'marginBottom': 14}),
+    ]
+    
+    if not selected_scenario and not is_done:
+        children.append(html.Div([
+            html.Span('⚠️ 请先完成第一步: 选择应用场景',
+                     style={'color': '#e67e22', 'fontSize': 13}),
+        ], style={'padding': 10, 'background': '#fef9e7', 'borderRadius': 6}))
+    elif selected_scenario:
+        sc_cfg = WIZARD_SCENARIOS[selected_scenario]
+        inputs = sc_cfg['inputs']
+        
+        input_rows = []
+        for inp in inputs:
+            default_val = scenario_inputs.get(inp['key'], inp['default'])
+            label_text = f"{inp['label']} ({inp['unit']})" if inp['unit'] else inp['label']
+            
+            input_rows.append(html.Div([
+                html.Label(label_text, style={
+                    'fontSize': 13, 'fontWeight': 'bold',
+                    'display': 'block', 'marginBottom': 4,
+                    'color': '#2c3e50',
+                }),
+                dcc.Input(
+                    id={'type': 'wizard-scenario-input', 'index': inp['key']},
+                    type='number',
+                    min=inp['min'], max=inp['max'], step=inp['step'],
+                    value=default_val,
+                    style={'width': '100%', 'padding': '8px 10px',
+                           'borderRadius': 6, 'border': '1px solid #bdc3c7',
+                           'fontSize': 14}
+                ),
+                html.Div(f"合理范围: {inp['hint']}",
+                        style={'fontSize': 11, 'color': '#7f8c8d', 'marginTop': 3}),
+            ], style={'width': '48%', 'display': 'inline-block',
+                      'marginRight': '2%' if inputs.index(inp) % 2 == 0 else 0,
+                      'marginBottom': 14}))
+        
+        children.append(html.Div(input_rows, style={'marginBottom': 6}))
+        
+        btn_row = []
+        btn_row.append(html.Button('← 返回修改场景', id='wizard-btn-prev-2', n_clicks=0,
+                                   style={'background': '#95a5a6', 'color': 'white',
+                                          'border': 'none', 'padding': '10px 18px',
+                                          'borderRadius': 6, 'fontSize': 13,
+                                          'cursor': 'pointer', 'marginRight': 10}))
+        btn_row.append(html.Button('下一步: 查看推荐参数 →', id='wizard-btn-next-2', n_clicks=0,
+                                   style={'background': '#1abc9c', 'color': 'white',
+                                          'border': 'none', 'padding': '10px 22px',
+                                          'borderRadius': 6, 'fontSize': 14,
+                                          'fontWeight': 'bold', 'cursor': 'pointer',
+                                          'float': 'right'}))
+        children.append(html.Div(btn_row, style={'marginTop': 10, 'overflow': 'hidden'}))
+    
+    return html.Div(children, style=_wizard_card_style(is_active, is_done))
+
+
+def _render_wizard_step_3(wizard_data, current_step):
+    """第三步: 智能推荐参数"""
+    is_active = current_step == 3
+    is_done = current_step > 3
+    
+    selected_scenario = wizard_data.get('scenario')
+    recommended = wizard_data.get('recommended_params', {})
+    
+    children = [
+        html.Div([
+            html.H4('3️⃣ 智能推荐参数', style={'margin': 0, 'color': '#117864'}),
+            html.Div('基于工程经验规则自动推算完整参数，可逐项微调推荐值',
+                    style={'fontSize': 12, 'color': '#7f8c8d', 'marginTop': 4}),
+        ], style={'marginBottom': 14}),
+    ]
+    
+    if not selected_scenario or not recommended:
+        children.append(html.Div([
+            html.Span('⚠️ 请先完成前两步',
+                     style={'color': '#e67e22', 'fontSize': 13}),
+        ], style={'padding': 10, 'background': '#fef9e7', 'borderRadius': 6}))
+    else:
+        sc_cfg = WIZARD_SCENARIOS[selected_scenario]
+        cycle_cfg = CYCLE_CONFIGS[sc_cfg['cycle_type']]
+        
+        table_header = html.Tr([
+            html.Th('参数名', style={'background': '#117864', 'color': 'white',
+                                    'padding': '10px 12px', 'textAlign': 'left'}),
+            html.Th('推荐值', style={'background': '#117864', 'color': 'white',
+                                    'padding': '10px 12px', 'width': 180}),
+            html.Th('单位', style={'background': '#117864', 'color': 'white',
+                                  'padding': '10px 12px', 'width': 80}),
+            html.Th('推荐依据', style={'background': '#117864', 'color': 'white',
+                                     'padding': '10px 12px', 'textAlign': 'left'}),
+        ])
+        
+        table_rows = []
+        for p_cfg in cycle_cfg['params']:
+            key = p_cfg['key']
+            rec_info = recommended.get(key, {})
+            rec_val = rec_info.get('value', p_cfg['default'])
+            rec_reason = rec_info.get('reason', '')
+            
+            table_rows.append(html.Tr([
+                html.Td(p_cfg['label'],
+                       style={'padding': '8px 12px', 'fontWeight': 'bold',
+                              'backgroundColor': '#f8f9fa'}),
+                html.Td(
+                    dcc.Input(
+                        id={'type': 'wizard-rec-input', 'index': key},
+                        type='number',
+                        min=p_cfg['min'], max=p_cfg['max'], step=p_cfg['step'],
+                        value=rec_val,
+                        style={'width': '100%', 'padding': '5px 8px',
+                               'borderRadius': 4, 'border': '1px solid #1abc9c',
+                               'fontSize': 13, 'background': '#eafaf1'}
+                    ),
+                    style={'padding': '6px 8px', 'background': '#eafaf1'}
+                ),
+                html.Td(p_cfg['unit'] if p_cfg['unit'] else '-',
+                       style={'padding': '8px 12px', 'textAlign': 'center',
+                              'color': '#7f8c8d'}),
+                html.Td(rec_reason,
+                       style={'padding': '8px 12px', 'fontSize': 11,
+                              'color': '#566573', 'lineHeight': 1.5}),
+            ]))
+        
+        children.append(html.Table([
+            html.Thead(table_header),
+            html.Tbody(table_rows),
+        ], style={'width': '100%', 'borderCollapse': 'collapse',
+                  'background': 'white', 'fontSize': 13,
+                  'marginBottom': 10, 'border': '1px solid #a3e4d7',
+                  'borderRadius': 8}))
+        
+        btn_row = []
+        btn_row.append(html.Button('← 返回修改工况', id='wizard-btn-prev-3', n_clicks=0,
+                                   style={'background': '#95a5a6', 'color': 'white',
+                                          'border': 'none', 'padding': '10px 18px',
+                                          'borderRadius': 6, 'fontSize': 13,
+                                          'cursor': 'pointer', 'marginRight': 10}))
+        btn_row.append(html.Button('下一步: 确认并计算 →', id='wizard-btn-next-3', n_clicks=0,
+                                   style={'background': '#1abc9c', 'color': 'white',
+                                          'border': 'none', 'padding': '10px 22px',
+                                          'borderRadius': 6, 'fontSize': 14,
+                                          'fontWeight': 'bold', 'cursor': 'pointer',
+                                          'float': 'right'}))
+        children.append(html.Div(btn_row, style={'marginTop': 14, 'overflow': 'hidden'}))
+    
+    return html.Div(children, style=_wizard_card_style(is_active, is_done))
+
+
+def _render_wizard_step_4(wizard_data, current_step, wizard_result):
+    """第四步: 确认并计算"""
+    is_active = current_step >= 4
+    is_done = current_step > 4
+    
+    selected_scenario = wizard_data.get('scenario')
+    recommended = wizard_data.get('recommended_params', {})
+    cycle_type = wizard_data.get('cycle_type')
+    
+    children = [
+        html.Div([
+            html.H4('4️⃣ 确认并计算', style={'margin': 0, 'color': '#117864'}),
+            html.Div('确认完整参数后生成循环方案，查看计算结果',
+                    style={'fontSize': 12, 'color': '#7f8c8d', 'marginTop': 4}),
+        ], style={'marginBottom': 14}),
+    ]
+    
+    if not selected_scenario or not recommended:
+        children.append(html.Div([
+            html.Span('⚠️ 请先完成前三步',
+                     style={'color': '#e67e22', 'fontSize': 13}),
+        ], style={'padding': 10, 'background': '#fef9e7', 'borderRadius': 6}))
+    else:
+        sc_cfg = WIZARD_SCENARIOS[selected_scenario]
+        cycle_cfg = CYCLE_CONFIGS.get(cycle_type, CYCLE_CONFIGS[sc_cfg['cycle_type']])
+        
+        summary_rows = []
+        for p_cfg in cycle_cfg['params']:
+            key = p_cfg['key']
+            val = recommended.get(key, {}).get('value', p_cfg['default'])
+            unit_str = f" {p_cfg['unit']}" if p_cfg['unit'] else ''
+            summary_rows.append(html.Tr([
+                html.Td(p_cfg['label'],
+                       style={'padding': '6px 10px', 'fontWeight': 'bold',
+                              'backgroundColor': '#f8f9fa',
+                              'borderBottom': '1px solid #ecf0f1'}),
+                html.Td(f'{val:g}{unit_str}',
+                       style={'padding': '6px 10px', 'textAlign': 'right',
+                              'color': '#117864', 'fontWeight': 'bold',
+                              'borderBottom': '1px solid #ecf0f1'}),
+            ]))
+        
+        children.append(html.Div([
+            html.Div([
+                html.Div([
+                    html.Strong('场景:', style={'color': '#566573'}),
+                    html.Span(f" {sc_cfg['icon']} {sc_cfg['name']}",
+                             style={'marginLeft': 6, 'color': sc_cfg['color'], 'fontWeight': 'bold'}),
+                ], style={'marginBottom': 4}),
+                html.Div([
+                    html.Strong('循环类型:', style={'color': '#566573'}),
+                    html.Span(f" {cycle_cfg['name']}",
+                             style={'marginLeft': 6, 'color': '#2c3e50', 'fontWeight': 'bold'}),
+                ]),
+            ], style={'width': '35%', 'padding': 12, 'background': '#eaf2f8',
+                     'borderRadius': 6, 'fontSize': 13}),
+            
+            html.Div([
+                html.Table([
+                    html.Thead(html.Tr([
+                        html.Th('参数名', style={'background': '#aed6f1',
+                                                'color': '#1a5276', 'padding': '6px 10px',
+                                                'textAlign': 'left', 'fontSize': 12}),
+                        html.Th('数值', style={'background': '#aed6f1',
+                                              'color': '#1a5276', 'padding': '6px 10px',
+                                              'textAlign': 'right', 'fontSize': 12, 'width': 120}),
+                    ])),
+                    html.Tbody(summary_rows),
+                ], style={'width': '100%', 'borderCollapse': 'collapse', 'fontSize': 12}),
+            ], style={'flex': 1, 'maxHeight': '280px', 'overflowY': 'auto',
+                     'border': '1px solid #d5dbdb', 'borderRadius': 6}),
+        ], style={'display': 'flex', 'gap': 14, 'marginBottom': 14}))
+        
+        if not wizard_result:
+            btn_row = []
+            btn_row.append(html.Button('← 返回微调参数', id='wizard-btn-prev-4', n_clicks=0,
+                                       style={'background': '#95a5a6', 'color': 'white',
+                                              'border': 'none', 'padding': '10px 18px',
+                                              'borderRadius': 6, 'fontSize': 13,
+                                              'cursor': 'pointer', 'marginRight': 10}))
+            btn_row.append(html.Button('🚀 生成循环方案', id='wizard-btn-compute', n_clicks=0,
+                                       style={'background': '#e74c3c', 'color': 'white',
+                                              'border': 'none', 'padding': '12px 28px',
+                                              'borderRadius': 6, 'fontSize': 15,
+                                              'fontWeight': 'bold', 'cursor': 'pointer',
+                                              'float': 'right'}))
+            children.append(html.Div(btn_row, style={'overflow': 'hidden'}))
+        else:
+            children.append(_render_wizard_result(wizard_data, wizard_result))
+    
+    return html.Div(children, style=_wizard_card_style(is_active, is_done))
+
+
+def _render_wizard_result(wizard_data, wizard_result):
+    """渲染向导计算结果"""
+    res = wizard_result.get('results', {})
+    cycle_type = wizard_data.get('cycle_type')
+    cfg = CYCLE_CONFIGS.get(cycle_type, {})
+    
+    eta = res.get('eta', res.get('eta_total', 0))
+    eta_carnot = res.get('eta_carnot', 0)
+    w_net = res.get('w_net', res.get('W_dot_total_kW', 0))
+    q_in = res.get('q_in', 0)
+    w_net_unit = 'kJ/kg' if 'w_net' in res else 'kW'
+    
+    def make_card(title, value, color, unit=''):
+        return html.Div([
+            html.Div(title, style={'fontSize': 12, 'color': '#7f8c8d', 'marginBottom': 4}),
+            html.Div(f'{value}{unit}',
+                    style={'fontSize': 22, 'fontWeight': 'bold', 'color': color}),
+        ], style={'flex': 1, 'background': '#f8f9fa', 'padding': 14, 'borderRadius': 8,
+                  'borderLeft': f'4px solid {color}'})
+    
+    cards = [
+        make_card('热效率 η', f'{eta*100:.2f}', '#e74c3c', '%'),
+        make_card('Carnot效率', f'{eta_carnot*100:.2f}', '#2980b9', '%'),
+        make_card('净输出功', f'{w_net:.2f}', '#27ae60', f' {w_net_unit}'),
+        make_card('吸热量', f'{q_in:.2f}', '#f39c12', ' kJ/kg' if 'w_net' in res else ' kW'),
+    ]
+    if 'eta_gas' in res:
+        cards.append(make_card('燃气效率', f"{res['eta_gas']*100:.2f}", '#8e44ad', '%'))
+        cards.append(make_card('蒸汽效率', f"{res['eta_steam']*100:.2f}", '#16a085', '%'))
+    
+    result_section = [
+        html.Div([
+            html.H5('📊 计算结果', style={'marginTop': 0, 'color': '#c0392b'}),
+            html.Div(cards, style={'display': 'flex', 'gap': 10, 'flexWrap': 'wrap'}),
+        ], style={'padding': 14, 'background': '#fdedec',
+                  'borderRadius': 8, 'border': '1px solid #f5b7b1',
+                  'marginBottom': 14}),
+    ]
+    
+    try:
+        param_dict = {k: v.get('value') for k, v in wizard_data.get('recommended_params', {}).items()}
+        cycle, _ = build_cycle(cycle_type, param_dict)
+        fig = plot_Ts_diagram(cycle)
+        result_section.append(html.Div([
+            html.H5('📈 T-s 图 (温度-比熵)', style={'marginTop': 0, 'color': '#117864'}),
+            dcc.Graph(id='wizard-ts-figure', figure=fig,
+                     style={'height': '450px', 'width': '100%'}),
+        ], style={'padding': 14, 'background': 'white',
+                  'borderRadius': 8, 'border': '1px solid #a3e4d7',
+                  'marginBottom': 14}))
+    except Exception as e:
+        result_section.append(html.Div([
+            html.Span(f'⚠️ T-s图生成失败: {e}', style={'color': '#e67e22'}),
+        ], style={'padding': 10, 'background': '#fef9e7', 'borderRadius': 6,
+                  'marginBottom': 14}))
+    
+    result_section.append(html.Div([
+        html.Div([
+            html.Button('← 返回微调参数', id='wizard-btn-prev-4', n_clicks=0,
+                       style={'background': '#95a5a6', 'color': 'white',
+                              'border': 'none', 'padding': '10px 18px',
+                              'borderRadius': 6, 'fontSize': 13,
+                              'cursor': 'pointer', 'marginRight': 10}),
+            html.Button('🔄 重新计算', id='wizard-btn-recompute', n_clicks=0,
+                       style={'background': '#f39c12', 'color': 'white',
+                              'border': 'none', 'padding': '10px 18px',
+                              'borderRadius': 6, 'fontSize': 13,
+                              'cursor': 'pointer', 'marginRight': 10}),
+        ], style={'display': 'inline-block'}),
+        html.Div([
+            html.Button('📋 应用到主面板', id='wizard-btn-apply', n_clicks=0,
+                       style={'background': '#2980b9', 'color': 'white',
+                              'border': 'none', 'padding': '10px 22px',
+                              'borderRadius': 6, 'fontSize': 14,
+                              'fontWeight': 'bold', 'cursor': 'pointer',
+                              'marginRight': 10}),
+            html.Button('💾 保存为工况', id='wizard-btn-save-case', n_clicks=0,
+                       style={'background': '#27ae60', 'color': 'white',
+                              'border': 'none', 'padding': '10px 22px',
+                              'borderRadius': 6, 'fontSize': 14,
+                              'fontWeight': 'bold', 'cursor': 'pointer'}),
+        ], style={'display': 'inline-block', 'float': 'right'}),
+        html.Div(id='wizard-apply-status', style={'fontSize': 12,
+                                                  'marginTop': 8,
+                                                  'minHeight': '16px'}),
+    ], style={'overflow': 'hidden'}))
+    
+    return html.Div(result_section)
+
+
+# ============================================================
+# 循环设计向导 - 回调函数
+# ============================================================
+
+@app.callback(
+    Output('wizard-step-store', 'data'),
+    [Input('wizard-btn-next-1', 'n_clicks'),
+     Input('wizard-btn-next-2', 'n_clicks'),
+     Input('wizard-btn-next-3', 'n_clicks'),
+     Input('wizard-btn-prev-2', 'n_clicks'),
+     Input('wizard-btn-prev-3', 'n_clicks'),
+     Input('wizard-btn-prev-4', 'n_clicks')],
+    [State('wizard-step-store', 'data'),
+     State('wizard-data-store', 'data')],
+    prevent_initial_call=True
+)
+def wizard_change_step(n1, n2, n3, p2, p3, p4, current_step, wizard_data):
+    ctx = callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
+    
+    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    current_step = current_step or 1
+    
+    if triggered_id == 'wizard-btn-next-1':
+        if wizard_data and wizard_data.get('scenario'):
+            return 2
+    elif triggered_id == 'wizard-btn-next-2':
+        return 3
+    elif triggered_id == 'wizard-btn-next-3':
+        return 4
+    elif triggered_id == 'wizard-btn-prev-2':
+        return 1
+    elif triggered_id == 'wizard-btn-prev-3':
+        return 2
+    elif triggered_id == 'wizard-btn-prev-4':
+        return 3
+    
+    raise PreventUpdate
+
+
+@app.callback(
+    Output('wizard-data-store', 'data'),
+    [Input({'type': 'wizard-scenario-card', 'index': ALL}, 'n_clicks'),
+     Input({'type': 'wizard-scenario-input', 'index': ALL}, 'value'),
+     Input({'type': 'wizard-rec-input', 'index': ALL}, 'value'),
+     Input('wizard-btn-next-2', 'n_clicks')],
+    [State('wizard-data-store', 'data')],
+    prevent_initial_call=False
+)
+def wizard_update_data(scenario_clicks, scenario_inputs, rec_inputs, btn_next_2, wizard_data):
+    ctx = callback_context
+    wizard_data = wizard_data or {
+        'scenario': None,
+        'scenario_inputs': {},
+        'recommended_params': {},
+        'cycle_type': None,
+    }
+    new_data = dict(wizard_data)
+    
+    if not ctx.triggered:
+        return new_data
+    
+    triggered = ctx.triggered[0]
+    prop_id = triggered['prop_id']
+    
+    try:
+        import json as _json
+        id_dict = _json.loads(prop_id.split('.')[0])
+        trigger_type = id_dict.get('type')
+        trigger_index = id_dict.get('index')
+    except:
+        trigger_type = prop_id.split('.')[0] if '.' in prop_id else None
+        trigger_index = None
+    
+    if trigger_type == 'wizard-scenario-card':
+        sc_key = trigger_index
+        if sc_key and sc_key in WIZARD_SCENARIOS:
+            sc_cfg = WIZARD_SCENARIOS[sc_key]
+            new_data['scenario'] = sc_key
+            new_data['cycle_type'] = sc_cfg['cycle_type']
+            new_data['scenario_inputs'] = {
+                inp['key']: inp['default'] for inp in sc_cfg['inputs']
+            }
+            new_data['recommended_params'] = {}
+    
+    elif trigger_type == 'wizard-scenario-input':
+        if new_data.get('scenario'):
+            sc_cfg = WIZARD_SCENARIOS[new_data['scenario']]
+            input_keys = [inp['key'] for inp in sc_cfg['inputs']]
+            scenario_inputs = list(scenario_inputs) if scenario_inputs else []
+            for i, k in enumerate(input_keys):
+                if i < len(scenario_inputs) and scenario_inputs[i] is not None:
+                    new_data['scenario_inputs'][k] = scenario_inputs[i]
+    
+    elif trigger_type == 'wizard-rec-input':
+        cycle_type = new_data.get('cycle_type')
+        if cycle_type and cycle_type in CYCLE_CONFIGS:
+            cfg = CYCLE_CONFIGS[cycle_type]
+            param_keys = [p['key'] for p in cfg['params']]
+            rec_inputs = list(rec_inputs) if rec_inputs else []
+            for i, pk in enumerate(param_keys):
+                if i < len(rec_inputs) and rec_inputs[i] is not None:
+                    if pk not in new_data['recommended_params']:
+                        new_data['recommended_params'][pk] = {}
+                    orig_reason = new_data['recommended_params'][pk].get('reason', '用户微调参数')
+                    new_data['recommended_params'][pk] = {
+                        'value': rec_inputs[i],
+                        'reason': orig_reason
+                    }
+    
+    elif trigger_type == 'wizard-btn-next-2':
+        if new_data.get('scenario'):
+            sc_cfg = WIZARD_SCENARIOS[new_data['scenario']]
+            try:
+                raw_rec = sc_cfg['recommend'](new_data['scenario_inputs'])
+                new_data['recommended_params'] = raw_rec
+                new_data['cycle_type'] = sc_cfg['cycle_type']
+            except:
+                pass
+    
+    return new_data
+
+
+@app.callback(
+    Output('wizard-result-store', 'data'),
+    [Input('wizard-btn-compute', 'n_clicks'),
+     Input('wizard-btn-recompute', 'n_clicks')],
+    [State('wizard-data-store', 'data')],
+    prevent_initial_call=True
+)
+def wizard_compute_cycle(n_compute, n_recompute, wizard_data):
+    if not wizard_data:
+        raise PreventUpdate
+    
+    cycle_type = wizard_data.get('cycle_type')
+    recommended = wizard_data.get('recommended_params', {})
+    
+    if not cycle_type or not recommended:
+        raise PreventUpdate
+    
+    param_dict = {}
+    for k, v in recommended.items():
+        param_dict[k] = v.get('value') if isinstance(v, dict) else v
+    
+    try:
+        cycle, res = build_cycle(cycle_type, param_dict)
+        return {
+            'cycle_type': cycle_type,
+            'results': _make_serializable(res),
+            'computed_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        }
+    except Exception as e:
+        return {
+            'cycle_type': cycle_type,
+            'results': {'error': str(e)},
+            'computed_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        }
+
+
+@app.callback(
+    [Output('cycle-type', 'value', allow_duplicate=True),
+     Output('wizard-apply-store', 'data'),
+     Output('wizard-apply-status', 'children')],
+    [Input('wizard-btn-apply', 'n_clicks')],
+    [State('wizard-data-store', 'data')],
+    prevent_initial_call=True
+)
+def wizard_apply_to_main(n_clicks, wizard_data):
+    if not wizard_data:
+        raise PreventUpdate
+    
+    cycle_type = wizard_data.get('cycle_type')
+    recommended = wizard_data.get('recommended_params', {})
+    
+    if not cycle_type or not recommended:
+        raise PreventUpdate
+    
+    status = html.Span(
+        f'✅ 已将参数应用到主面板 ({CYCLE_CONFIGS.get(cycle_type, {}).get("name", cycle_type)})，可切换到"热力学图"Tab查看',
+        style={'color': '#27ae60', 'fontSize': 12}
+    )
+    
+    return cycle_type, True, status
+
+
+@app.callback(
+    [Output(f"param-{k}-{p['key']}", 'value', allow_duplicate=True)
+     for k in CYCLE_CONFIGS
+     for p in CYCLE_CONFIGS[k]['params']],
+    [Input('wizard-apply-store', 'data')],
+    [State('cycle-type', 'value'),
+     State('wizard-data-store', 'data')],
+    prevent_initial_call=True
+)
+def _sync_wizard_params_to_main(apply_triggered, cycle_type, wizard_data):
+    if not apply_triggered or not wizard_data:
+        raise PreventUpdate
+    
+    recommended = wizard_data.get('recommended_params', {})
+    if not recommended or not cycle_type:
+        raise PreventUpdate
+    
+    output_values = []
+    for ck in CYCLE_CONFIGS:
+        for p in CYCLE_CONFIGS[ck]['params']:
+            if ck == cycle_type and p['key'] in recommended:
+                val = recommended[p['key']]
+                if isinstance(val, dict):
+                    output_values.append(val.get('value', p['default']))
+                else:
+                    output_values.append(val)
+            else:
+                output_values.append(p['default'])
+    
+    return output_values
+
+
+@app.callback(
+    [Output('cases-store', 'data', allow_duplicate=True),
+     Output('wizard-apply-status', 'children', allow_duplicate=True)],
+    [Input('wizard-btn-save-case', 'n_clicks')],
+    [State('wizard-data-store', 'data'),
+     State('wizard-result-store', 'data'),
+     State('cases-store', 'data')],
+    prevent_initial_call=True
+)
+def wizard_save_as_case(n_clicks, wizard_data, wizard_result, saved_cases):
+    if not wizard_data or not wizard_result:
+        raise PreventUpdate
+    
+    saved_cases = saved_cases or []
+    if len(saved_cases) >= MAX_CASES:
+        return saved_cases, html.Span(
+            f'❌ 已达最大工况数({MAX_CASES})', style={'color': '#c0392b'}
+        )
+    
+    cycle_type = wizard_data.get('cycle_type')
+    cfg = CYCLE_CONFIGS.get(cycle_type, {})
+    recommended = wizard_data.get('recommended_params', {})
+    param_dict = {k: (v.get('value') if isinstance(v, dict) else v)
+                  for k, v in recommended.items()}
+    
+    sc_name = WIZARD_SCENARIOS.get(wizard_data.get('scenario'), {}).get('name', '自定义')
+    case_name = f"向导-{sc_name}"
+    
+    try:
+        cycle, res = build_cycle(cycle_type, param_dict)
+        states_dict = {label: sp.to_dict() for label, sp in cycle.states.items()}
+    except:
+        states_dict = {}
+        res = wizard_result.get('results', {})
+    
+    case_id = _generate_case_id()
+    case_record = {
+        'id': case_id,
+        'name': case_name,
+        'cycle_type': cycle_type,
+        'cycle_name': cfg.get('name', cycle_type),
+        'params': param_dict,
+        'results': _make_serializable(res),
+        'states': states_dict,
+        'fluid_type': _extract_cycle_fluid_type(cycle_type),
+        'color': CASE_COLORS[len(saved_cases) % len(CASE_COLORS)],
+        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    
+    saved_cases.append(case_record)
+    
+    status = html.Span(
+        f'✅ 已保存工况 "{case_name}" ({len(saved_cases)}/{MAX_CASES})',
+        style={'color': '#27ae60', 'fontSize': 12}
+    )
+    
+    return saved_cases, status
 
 
 # ============================================================
