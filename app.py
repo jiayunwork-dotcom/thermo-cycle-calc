@@ -14,7 +14,7 @@ import pandas as pd
 from datetime import datetime
 
 import dash
-from dash import dcc, html, dash_table, Input, Output, State, callback_context
+from dash import dcc, html, dash_table, Input, Output, State, callback_context, ALL, MATCH
 from dash.exceptions import PreventUpdate
 import plotly.graph_objects as go
 
@@ -33,7 +33,10 @@ from plots import (
     plot_exergy_bar, plot_parametric_curve, plot_2d_contour,
     plot_superimposed_Ts, plot_comparison_radar
 )
-from analysis import parametric_sweep, multi_param_sweep, exergy_analysis_summary
+from analysis import (
+    parametric_sweep, multi_param_sweep, exergy_analysis_summary,
+    GeneticOptimizer, MIN_QUALITY
+)
 from export_utils import (
     export_states_csv, export_results_csv,
     export_figure_svg, export_figure_png,
@@ -414,6 +417,10 @@ app.layout = html.Div([
                        style={'padding': 10, 'fontWeight': 'bold',
                               'background': 'linear-gradient(135deg, #e8daef, #d6eaf8)',
                               'color': '#6c3483'}),
+                dcc.Tab(label='🎯 循环优化求解器', value='tab-optimize',
+                       style={'padding': 10, 'fontWeight': 'bold',
+                              'background': 'linear-gradient(135deg, #fcf3cf, #fadbd8)',
+                              'color': '#935116'}),
             ], style={'marginBottom': 12}),
             
             html.Div(id='tab-content'),
@@ -430,6 +437,12 @@ app.layout = html.Div([
     dcc.Store(id='compare-result-store', data=None),
     # 工况选择状态存储 (保存勾选的工况ID)
     dcc.Store(id='cases-selection-store', data=[]),
+    # 优化结果存储
+    dcc.Store(id='optimize-result-store', data=None),
+    # 优化进度存储 (当前代数)
+    dcc.Store(id='optimize-progress-store', data=None),
+    # 优化运行状态
+    dcc.Store(id='optimize-running-store', data=False),
     
 ], style={'fontFamily': 'PingFang SC, Microsoft YaHei, Arial, sans-serif'})
 
@@ -568,8 +581,15 @@ def _make_serializable(obj):
               [Input('tabs', 'value'),
                Input('cycle-data-store', 'data'),
                Input('diagram-type', 'value'),
-               Input('compare-result-store', 'data')])
-def render_tab(tab, store_data, diagram_type, compare_result):
+               Input('compare-result-store', 'data'),
+               Input('optimize-result-store', 'data'),
+               Input('optimize-progress-store', 'data')])
+def render_tab(tab, store_data, diagram_type, compare_result,
+               opt_result, opt_progress):
+    # ====== 优化求解器Tab (独立处理) ======
+    if tab == 'tab-optimize':
+        return _render_optimize_tab(opt_result, opt_progress)
+    
     # ====== 工况对比Tab (独立处理) ======
     if tab == 'tab-compare':
         if not compare_result:
@@ -2272,6 +2292,987 @@ def export_compare_png(n_clicks, compare_result):
                    type='image/png', base64=True)
     else:
         return dict(content=f'PNG导出失败: {msg}', filename='export_error.txt')
+
+
+# ============================================================
+# 循环优化求解器 - 辅助函数
+# ============================================================
+
+def _render_optimize_tab(opt_result, opt_progress):
+    """渲染优化求解器Tab"""
+    return html.Div([
+        html.H3('🎯 循环优化求解器 (遗传算法)',
+                style={'marginTop': 0, 'color': '#935116',
+                       'borderBottom': '2px solid #e67e22',
+                       'paddingBottom': 10}),
+        
+        html.Div([
+            html.Span('使用说明:', style={'fontWeight': 'bold', 'color': '#2c3e50'}),
+            html.Ol([
+                html.Li('选择循环类型和优化目标（最大化热效率或净功）'),
+                html.Li('勾选参与优化的参数，设置其上下界（未勾选的参数将使用左侧面板当前值固定不变）'),
+                html.Li('可调整遗传算法参数（种群大小/代数/交叉率/变异率），使用默认值也可'),
+                html.Li('两个固定约束条件: 涡轮出口干度≥0.88、状态点温度不超过工质上限。不满足约束的解将直接淘汰。'),
+                html.Li('点击"开始优化"，等待进度完成后查看最优结果'),
+            ], style={'lineHeight': 1.8, 'marginTop': 6, 'marginBottom': 0}),
+        ], style={'padding': 16, 'background': '#fef9e7',
+                  'borderRadius': 8, 'borderLeft': '4px solid #e67e22',
+                  'marginTop': 16, 'marginBottom': 20}),
+        
+        # ===== 上半部分: 左侧参数配置 + 右侧进度/控制 =====
+        html.Div([
+            # ---- 左侧: 参数配置 ----
+            html.Div([
+                # 1. 循环类型 + 优化目标
+                html.Div([
+                    html.H4('1️⃣ 基本设置', style={'marginTop': 0, 'color': '#935116'}),
+                    html.Div([
+                        html.Label('循环类型:', style={'fontWeight': 'bold',
+                                                         'display': 'block',
+                                                         'marginBottom': 6}),
+                        dcc.Dropdown(
+                            id='opt-cycle-type',
+                            options=[{'label': v['name'], 'value': k}
+                                     for k, v in CYCLE_CONFIGS.items()],
+                            value='rankine_basic',
+                            clearable=False,
+                            style={'fontSize': 13, 'marginBottom': 14}
+                        ),
+                    ]),
+                    html.Div([
+                        html.Label('优化目标:', style={'fontWeight': 'bold',
+                                                         'display': 'block',
+                                                         'marginBottom': 6}),
+                        dcc.RadioItems(
+                            id='opt-objective',
+                            options=[
+                                {'label': ' 最大化热效率 η', 'value': 'eta'},
+                                {'label': ' 最大化净输出功 W_net', 'value': 'w_net'},
+                            ],
+                            value='eta',
+                            labelStyle={'display': 'block',
+                                        'marginBottom': 6,
+                                        'fontSize': 13}
+                        ),
+                    ]),
+                ], style={'padding': 14, 'background': '#fdfefe',
+                          'border': '1px solid #d5dbdb',
+                          'borderRadius': 8, 'marginBottom': 16}),
+                
+                # 2. 参数上下界设置 (动态根据循环类型渲染)
+                html.Div([
+                    html.H4('2️⃣ 参数优化范围',
+                            style={'marginTop': 0, 'color': '#935116',
+                                   'marginBottom': 10}),
+                    html.Div(id='opt-param-configs',
+                             style={'maxHeight': '320px', 'overflowY': 'auto',
+                                    'paddingRight': 8}),
+                ], style={'padding': 14, 'background': '#fdfefe',
+                          'border': '1px solid #d5dbdb',
+                          'borderRadius': 8, 'marginBottom': 16}),
+                
+                # 3. 遗传算法参数
+                html.Div([
+                    html.H4('3️⃣ 遗传算法参数',
+                            style={'marginTop': 0, 'color': '#935116',
+                                   'marginBottom': 10}),
+                    html.Div([
+                        html.Div([
+                            html.Label('种群大小:', style={'fontSize': 12,
+                                                             'display': 'block',
+                                                             'marginBottom': 3}),
+                            dcc.Input(id='opt-pop-size', type='number',
+                                      min=10, max=500, step=10, value=50,
+                                      style={'width': '100%', 'padding': 5,
+                                             'fontSize': 12}),
+                        ], style={'width': '48%', 'display': 'inline-block',
+                                  'marginRight': '4%', 'marginBottom': 10}),
+                        html.Div([
+                            html.Label('进化代数:', style={'fontSize': 12,
+                                                             'display': 'block',
+                                                             'marginBottom': 3}),
+                            dcc.Input(id='opt-n-gen', type='number',
+                                      min=5, max=500, step=5, value=80,
+                                      style={'width': '100%', 'padding': 5,
+                                             'fontSize': 12}),
+                        ], style={'width': '48%', 'display': 'inline-block',
+                                  'marginBottom': 10}),
+                        html.Div([
+                            html.Label('交叉率:', style={'fontSize': 12,
+                                                           'display': 'block',
+                                                           'marginBottom': 3}),
+                            dcc.Input(id='opt-cx-rate', type='number',
+                                      min=0.0, max=1.0, step=0.05, value=0.8,
+                                      style={'width': '100%', 'padding': 5,
+                                             'fontSize': 12}),
+                        ], style={'width': '48%', 'display': 'inline-block',
+                                  'marginRight': '4%'}),
+                        html.Div([
+                            html.Label('变异率:', style={'fontSize': 12,
+                                                           'display': 'block',
+                                                           'marginBottom': 3}),
+                            dcc.Input(id='opt-mut-rate', type='number',
+                                      min=0.0, max=1.0, step=0.01, value=0.1,
+                                      style={'width': '100%', 'padding': 5,
+                                             'fontSize': 12}),
+                        ], style={'width': '48%', 'display': 'inline-block'}),
+                    ]),
+                    html.Div([
+                        html.Small('💡 提示: 参数越多/种群越大/代数越多，计算时间越长。',
+                                   style={'color': '#7f8c8d', 'fontSize': 11}),
+                    ], style={'marginTop': 8}),
+                ], style={'padding': 14, 'background': '#fdfefe',
+                          'border': '1px solid #d5dbdb',
+                          'borderRadius': 8, 'marginBottom': 16}),
+                
+                # 4. 开始按钮
+                html.Div([
+                    html.Button('🚀 开始优化', id='btn-run-optimize', n_clicks=0,
+                               style={'background': '#e67e22', 'color': 'white',
+                                      'border': 'none', 'padding': '12px 24px',
+                                      'borderRadius': 6, 'fontSize': 15,
+                                      'fontWeight': 'bold', 'cursor': 'pointer',
+                                      'width': '100%'}),
+                ]),
+            ], style={'width': '420px', 'flexShrink': 0,
+                      'paddingRight': 20}),
+            
+            # ---- 右侧: 进度 + 结果预览 ----
+            html.Div([
+                # 进度显示
+                html.Div(id='opt-progress-panel',
+                         children=_render_opt_progress(opt_progress,
+                                                        opt_result is not None),
+                         style={'padding': 16, 'background': '#eaf2f8',
+                                'border': '1px solid #aed6f1',
+                                'borderRadius': 8, 'marginBottom': 16,
+                                'minHeight': '120px'}),
+                
+                # 保存为工况按钮 (静态放置, 始终存在)
+                html.Div([
+                    html.Div([
+                        html.Button('💾 保存最优解为工况',
+                                   id='btn-save-opt-case', n_clicks=0,
+                                   disabled=(opt_result is None or 'error' in opt_result),
+                                   style={'background': '#2980b9' if opt_result and 'error' not in opt_result else '#95a5a6',
+                                          'color': 'white',
+                                          'border': 'none', 'padding': '10px 20px',
+                                          'borderRadius': 6, 'fontSize': 13,
+                                          'fontWeight': 'bold', 'cursor': 'pointer',
+                                          'whiteSpace': 'nowrap', 'width': '100%'}),
+                        html.Div(id='opt-save-status',
+                                style={'fontSize': 11, 'marginTop': 6,
+                                       'minHeight': '14px', 'textAlign': 'center'}),
+                    ]),
+                ], style={'padding': 14, 'background': '#ebf5fb',
+                          'border': '1px solid #aed6f1',
+                          'borderRadius': 8, 'marginBottom': 16}),
+                
+                # 约束说明
+                html.Div([
+                    html.Strong('📌 固定约束条件 (不满足将淘汰):',
+                               style={'color': '#922b21', 'display': 'block',
+                                      'marginBottom': 6}),
+                    html.Ul([
+                        html.Li(f'涡轮出口干度 x ≥ {MIN_QUALITY}'
+                                ' (对水蒸气循环有效)'),
+                        html.Li('所有状态点温度 ≤ 工质上限'
+                                ' (水蒸气650°C / 空气1500°C)'),
+                    ], style={'fontSize': 12, 'color': '#616a6b',
+                              'margin': 0, 'paddingLeft': 22}),
+                ], style={'padding': 12, 'background': '#fdedec',
+                          'border': '1px solid #f5b7b1',
+                          'borderRadius': 8, 'fontSize': 12}),
+            ], style={'flex': 1}),
+        ], style={'display': 'flex', 'marginBottom': 20}),
+        
+        # ===== 下半部分: 优化结果展示 =====
+        html.Div(id='opt-results-section',
+                 children=_render_opt_results(opt_result) if opt_result else html.Div(
+                     [html.Div('📊 优化完成后将在此处显示结果',
+                              style={'textAlign': 'center',
+                                     'padding': 40,
+                                     'color': '#95a5a6',
+                                     'background': '#f8f9fa',
+                                     'borderRadius': 8})])),
+    ], style={'padding': 4})
+
+
+def _render_opt_progress(opt_progress, finished=False):
+    """渲染优化进度面板"""
+    if not opt_progress and not finished:
+        return html.Div([
+            html.Strong('⏳ 等待开始优化...',
+                       style={'color': '#2c3e50', 'fontSize': 14}),
+            html.Div('设置好参数后点击"开始优化"按钮',
+                    style={'color': '#7f8c8d', 'fontSize': 12,
+                           'marginTop': 6}),
+        ])
+    
+    if finished:
+        gen = opt_progress.get('generation', 0) if opt_progress else '?'
+        total = opt_progress.get('total', '?') if opt_progress else '?'
+        best = opt_progress.get('best_fitness', 0) if opt_progress else 0
+        obj_type = opt_progress.get('objective', 'eta') if opt_progress else 'eta'
+        
+        best_str = (f'{best*100:.3f}%' if obj_type == 'eta'
+                    else f'{best:.3f} kJ/kg')
+        return html.Div([
+            html.Div([
+                html.Span('✅ 优化完成!',
+                         style={'color': '#27ae60', 'fontSize': 16,
+                                'fontWeight': 'bold'}),
+            ], style={'marginBottom': 6}),
+            html.Div([
+                html.Span(f'共运行 {gen}/{total} 代',
+                         style={'color': '#2c3e50', 'fontSize': 13}),
+                html.Span(f'  |  最佳目标值: {best_str}',
+                         style={'color': '#e67e22', 'fontSize': 13,
+                                'fontWeight': 'bold', 'marginLeft': 12}),
+            ]),
+            # 进度条 (满格)
+            html.Div([
+                html.Div(style={'width': '100%',
+                                'height': '20px',
+                                'background': '#27ae60',
+                                'borderRadius': 10,
+                                'transition': 'width 0.3s'}),
+            ], style={'width': '100%', 'background': '#ecf0f1',
+                      'borderRadius': 10, 'overflow': 'hidden',
+                      'marginTop': 10}),
+        ])
+    
+    # 运行中
+    gen = opt_progress.get('generation', 0)
+    total = opt_progress.get('total', 1)
+    best = opt_progress.get('best_fitness', 0)
+    obj_type = opt_progress.get('objective', 'eta')
+    pct = min(gen / max(total, 1) * 100, 100)
+    
+    best_str = (f'{best*100:.3f}%' if obj_type == 'eta'
+                else f'{best:.3f} kJ/kg')
+    
+    return html.Div([
+        html.Div([
+            dcc.Loading(
+                id='opt-loading-icon',
+                type='circle',
+                color='#2980b9',
+                children=[
+                    html.Span('🔄 优化进行中...',
+                             style={'color': '#2980b9', 'fontSize': 15,
+                                    'fontWeight': 'bold'}),
+                ]
+            ),
+        ], style={'marginBottom': 6}),
+        html.Div([
+            html.Span(f'第 {gen}/{total} 代  ({pct:.0f}%)',
+                     style={'color': '#2c3e50', 'fontSize': 13,
+                            'fontWeight': 'bold'}),
+            html.Span(f'  |  当前最佳: {best_str}',
+                     style={'color': '#e67e22', 'fontSize': 13,
+                            'fontWeight': 'bold', 'marginLeft': 12}),
+        ]),
+        # 进度条
+        html.Div([
+            html.Div(style={'width': f'{pct:.0f}%',
+                            'height': '20px',
+                            'background': 'linear-gradient(90deg, #3498db, #2980b9)',
+                            'borderRadius': 10,
+                            'transition': 'width 0.3s'}),
+        ], style={'width': '100%', 'background': '#ecf0f1',
+                  'borderRadius': 10, 'overflow': 'hidden',
+                  'marginTop': 10}),
+    ])
+
+
+def _render_opt_results(opt_result):
+    """渲染优化结果 (最优参数表 + 收敛曲线 + 完整循环结果)"""
+    cfg_key = opt_result.get('cycle_type', 'rankine_basic')
+    cfg = CYCLE_CONFIGS.get(cfg_key, {})
+    best_params = opt_result.get('best_params', {})
+    obj_type = opt_result.get('objective_type', 'eta')
+    best_obj = opt_result.get('best_objective', 0)
+    initial_params = opt_result.get('initial_params', {})
+    
+    obj_label = '热效率 η' if obj_type == 'eta' else '净输出功 W_net'
+    obj_unit = '%' if obj_type == 'eta' else ' kJ/kg'
+    obj_val_str = (f'{best_obj*100:.3f}%' if obj_type == 'eta'
+                   else f'{best_obj:.3f}{obj_unit}')
+    
+    # === 1. 最佳目标值大卡片 ===
+    result_header = html.Div([
+        html.Div([
+            html.Div(f'最优{obj_label}',
+                    style={'fontSize': 13, 'color': '#7f8c8d',
+                           'marginBottom': 4}),
+            html.Div(obj_val_str,
+                    style={'fontSize': 32, 'fontWeight': 'bold',
+                           'color': '#e67e22'}),
+            html.Div(f'({cfg.get("name", cfg_key)})',
+                    style={'fontSize': 12, 'color': '#95a5a6',
+                           'marginTop': 2}),
+        ], style={'flex': 1, 'padding': 16, 'background': '#fdf2e9',
+                  'borderRadius': 8, 'borderLeft': '5px solid #e67e22'}),
+    ], style={'display': 'flex', 'gap': 16, 'padding': 16,
+              'background': '#fef9e7', 'borderRadius': 8,
+              'marginBottom': 16, 'alignItems': 'center'})
+    
+    # === 2. 最优参数表 ===
+    param_rows = []
+    for p_cfg in cfg.get('params', []):
+        key = p_cfg['key']
+        label = p_cfg['label']
+        unit = p_cfg.get('unit', '')
+        opt_val = best_params.get(key, p_cfg.get('default'))
+        init_val = initial_params.get(key, p_cfg.get('default'))
+        
+        is_optimized = key in opt_result.get('optimized_keys', [])
+        
+        # 变化百分比
+        if init_val and init_val != 0:
+            pct = (opt_val - init_val) / abs(init_val) * 100
+            pct_str = f'{pct:+.2f}%'
+            pct_color = '#27ae60' if pct > 0 else (
+                '#e74c3c' if pct < 0 else '#7f8c8d')
+        else:
+            pct_str = '-'
+            pct_color = '#7f8c8d'
+        
+        opt_val_display = f'{opt_val:.4g}'
+        init_val_display = f'{init_val:.4g}'
+        
+        row_style = {}
+        if is_optimized:
+            row_style['backgroundColor'] = '#fef9e7'
+        
+        param_rows.append(html.Tr([
+            html.Td(label,
+                   style={'padding': '8px 12px', 'fontWeight': 'bold',
+                          'backgroundColor': '#f8f9fa', **row_style}),
+            html.Td(unit, style={'padding': '8px 12px',
+                                 'color': '#7f8c8d', **row_style}),
+            html.Td(init_val_display,
+                   style={'padding': '8px 12px', 'textAlign': 'right',
+                          'backgroundColor': '#eaf2f8', **row_style}),
+            html.Td(html.Strong(opt_val_display,
+                                style={'color': '#935116'}),
+                   style={'padding': '8px 12px', 'textAlign': 'right',
+                          'backgroundColor': '#fdebd0',
+                          'fontWeight': 'bold', **row_style}),
+            html.Td(pct_str,
+                   style={'padding': '8px 12px', 'textAlign': 'right',
+                          'color': pct_color, 'fontWeight': 'bold',
+                          **row_style}),
+            html.Td(
+                html.Span('✓' if is_optimized else '—',
+                         style={'color': '#27ae60' if is_optimized else '#bdc3c7',
+                                'fontWeight': 'bold'}),
+                style={'padding': '8px 12px', 'textAlign': 'center', **row_style}
+            ),
+        ]))
+    
+    param_table = html.Div([
+        html.H4('📋 最优参数表', style={'marginTop': 0, 'color': '#935116'}),
+        html.Div([
+            html.Span('📌 高亮行 = 参与优化的参数  |  ',
+                     style={'fontSize': 11, 'color': '#7f8c8d'}),
+            html.Span('绿↑ = 相比初始值增加  |  红↓ = 相比初始值减少',
+                     style={'fontSize': 11, 'color': '#7f8c8d'}),
+        ], style={'marginBottom': 8}),
+        html.Table([
+            html.Thead(html.Tr([
+                html.Th('参数名',
+                        style={'background': '#e67e22', 'color': 'white',
+                               'padding': '10px 12px', 'textAlign': 'left'}),
+                html.Th('单位',
+                        style={'background': '#e67e22', 'color': 'white',
+                               'padding': '10px 12px'}),
+                html.Th('初始值',
+                        style={'background': '#e67e22', 'color': 'white',
+                               'padding': '10px 12px'}),
+                html.Th('最优值',
+                        style={'background': '#e67e22', 'color': 'white',
+                               'padding': '10px 12px'}),
+                html.Th('变化率',
+                        style={'background': '#e67e22', 'color': 'white',
+                               'padding': '10px 12px'}),
+                html.Th('优化?',
+                        style={'background': '#e67e22', 'color': 'white',
+                               'padding': '10px 12px'}),
+            ])),
+            html.Tbody(param_rows),
+        ], style={'width': '100%', 'borderCollapse': 'collapse',
+                  'background': 'white', 'fontSize': 13,
+                  'marginBottom': 10}),
+    ], style={'padding': 16, 'background': '#fdfefe',
+              'border': '1px solid #f6b26b',
+              'borderRadius': 8, 'marginBottom': 16})
+    
+    # === 3. 收敛曲线 ===
+    gen_best = opt_result.get('generation_best', [])
+    gen_avg = opt_result.get('generation_avg', [])
+    n_gen = opt_result.get('n_generations', len(gen_best) - 1)
+    
+    # 准备图表数据
+    x_axis = list(range(len(gen_best)))
+    
+    # 目标值显示格式
+    if obj_type == 'eta':
+        y_best = [v * 100 for v in gen_best]
+        y_avg = [v * 100 for v in gen_avg]
+        y_title = f'{obj_label} (%)'
+    else:
+        y_best = gen_best
+        y_avg = gen_avg
+        y_title = f'{obj_label} (kJ/kg)'
+    
+    conv_fig = go.Figure()
+    conv_fig.add_trace(go.Scatter(
+        x=x_axis, y=y_best, mode='lines+markers',
+        name='每代最优', line=dict(color='#e67e22', width=2),
+        marker=dict(size=5)
+    ))
+    conv_fig.add_trace(go.Scatter(
+        x=x_axis, y=y_avg, mode='lines',
+        name='每代平均', line=dict(color='#3498db', width=2, dash='dot')
+    ))
+    conv_fig.update_layout(
+        title=dict(text=f'📈 收敛曲线 - {cfg.get("name", cfg_key)}',
+                   font=dict(size=15, color='#935116')),
+        xaxis_title='进化代数',
+        yaxis_title=y_title,
+        height=420,
+        legend=dict(orientation='h', y=1.02, x=0),
+        hovermode='x unified',
+        plot_bgcolor='#f8f9fa',
+    )
+    
+    # 可行性曲线
+    valid_counts = opt_result.get('valid_count_per_gen', [])
+    pop_size = opt_result.get('pop_size', 1)
+    feas_fig = go.Figure()
+    feas_fig.add_trace(go.Bar(
+        x=list(range(len(valid_counts))),
+        y=[v / pop_size * 100 for v in valid_counts],
+        marker_color='#27ae60',
+        name='可行解比例',
+        opacity=0.75
+    ))
+    feas_fig.update_layout(
+        title=dict(text='✅ 可行解比例 (每代)', font=dict(size=14, color='#1e8449')),
+        xaxis_title='进化代数',
+        yaxis_title='可行解比例 (%)',
+        height=280,
+        plot_bgcolor='#f8f9fa',
+        yaxis_range=[0, 105],
+    )
+    
+    convergence_section = html.Div([
+        html.H4('📈 收敛过程', style={'marginTop': 0, 'color': '#935116'}),
+        dcc.Graph(id='opt-conv-figure', figure=conv_fig,
+                 style={'marginBottom': 8}),
+        dcc.Graph(id='opt-feasibility-figure', figure=feas_fig),
+    ], style={'padding': 16, 'background': '#fdfefe',
+              'border': '1px solid #f6b26b',
+              'borderRadius': 8, 'marginBottom': 16})
+    
+    # === 4. 完整循环结果 (效率卡片 + T-s图 + 状态点) ===
+    # 用最优参数重新计算完整循环
+    try:
+        best_cycle, best_res = build_cycle(cfg_key, best_params)
+        # 效率卡片
+        eta = best_res.get('eta', best_res.get('eta_total', 0))
+        eta_carnot = best_res.get('eta_carnot', 0)
+        w_net = best_res.get('w_net', best_res.get('W_dot_total_kW', 0))
+        q_in = best_res.get('q_in', 0)
+        w_net_unit = 'kJ/kg' if 'w_net' in best_res else 'kW'
+        
+        def _make_small_card(title, value, color, unit=''):
+            return html.Div([
+                html.Div(title, style={'fontSize': 11, 'color': '#7f8c8d',
+                                       'marginBottom': 2}),
+                html.Div(f'{value}{unit}',
+                        style={'fontSize': 18, 'fontWeight': 'bold',
+                               'color': color}),
+            ], style={'flex': 1, 'background': '#f8f9fa',
+                      'padding': 10, 'borderRadius': 6,
+                      'borderLeft': f'3px solid {color}'})
+        
+        opt_cards = [
+            _make_small_card('热效率 η', f'{eta*100:.2f}', '#e74c3c', '%'),
+            _make_small_card('Carnot效率', f'{eta_carnot*100:.2f}', '#2980b9', '%'),
+            _make_small_card('净输出功', f'{w_net:.2f}', '#27ae60', f' {w_net_unit}'),
+            _make_small_card('吸热量', f'{q_in:.2f}', '#f39c12', ' kJ/kg' if 'w_net' in best_res else ' kW'),
+        ]
+        if 'eta_gas' in best_res:
+            opt_cards.append(_make_small_card('燃气效率', f"{best_res['eta_gas']*100:.2f}", '#8e44ad', '%'))
+            opt_cards.append(_make_small_card('蒸汽效率', f"{best_res['eta_steam']*100:.2f}", '#16a085', '%'))
+        
+        # T-s图
+        ts_fig = plot_Ts_diagram(best_cycle)
+        
+        # 状态点表
+        state_rows = []
+        for label, sp in sorted(best_cycle.states.items()):
+            state_rows.append({
+                '状态点': label,
+                '温度 (°C)': round(sp.T - 273.15, 2) if sp.T else None,
+                '压力 (MPa)': round(sp.P, 4) if sp.P else None,
+                '比焓 (kJ/kg)': round(sp.h, 2) if sp.h else None,
+                '比熵 (kJ/kg·K)': round(sp.s, 4) if sp.s else None,
+                '干度 x': round(sp.x, 4) if sp.x is not None else '-',
+            })
+        state_df = pd.DataFrame(state_rows)
+        
+        cycle_section = html.Div([
+            html.H4('♻️ 最优参数下的完整循环结果',
+                    style={'marginTop': 0, 'color': '#935116'}),
+            # 效率卡片
+            html.Div(opt_cards, style={'display': 'flex', 'gap': 8,
+                                       'marginBottom': 14, 'flexWrap': 'wrap'}),
+            # T-s图
+            html.Div([
+                html.H5('T-s 图 (温度-比熵)',
+                       style={'color': '#2c3e50', 'marginTop': 0,
+                              'marginBottom': 6}),
+                dcc.Graph(id='opt-best-ts', figure=ts_fig,
+                         style={'height': '420px'}),
+            ], style={'marginBottom': 14}),
+            # 状态点表
+            html.Div([
+                html.H5('状态点参数',
+                       style={'color': '#2c3e50', 'marginTop': 0,
+                              'marginBottom': 6}),
+                dash_table.DataTable(
+                    data=state_df.to_dict('records'),
+                    columns=[{'name': c, 'id': c} for c in state_df.columns],
+                    style_table={'overflowX': 'auto'},
+                    style_header={'backgroundColor': '#16a085',
+                                  'color': 'white', 'fontWeight': 'bold'},
+                    style_cell={'padding': '5px 10px', 'fontSize': 12,
+                               'textAlign': 'center'},
+                    style_data_conditional=[
+                        {'if': {'column_id': '状态点'},
+                         'fontWeight': 'bold',
+                         'backgroundColor': '#f8f9fa'}
+                    ]
+                ),
+            ]),
+        ], style={'padding': 16, 'background': '#fdfefe',
+                  'border': '1px solid #f6b26b',
+                  'borderRadius': 8})
+    
+    except Exception as e:
+        cycle_section = html.Div([
+            html.H4('♻️ 最优参数下的完整循环结果',
+                    style={'marginTop': 0, 'color': '#935116'}),
+            html.Div(f'❌ 重建循环失败: {e}',
+                    style={'padding': 20, 'color': '#c0392b',
+                           'background': '#fdecea', 'borderRadius': 6}),
+        ], style={'padding': 16, 'background': '#fdfefe',
+                  'border': '1px solid #f6b26b',
+                  'borderRadius': 8})
+    
+    return html.Div([
+        result_header,
+        param_table,
+        convergence_section,
+        cycle_section,
+    ], id='opt-results-wrapper')
+
+
+# ============================================================
+# 优化求解器 - 辅助函数: 渲染参数配置面板
+# ============================================================
+
+@app.callback(
+    Output('opt-param-configs', 'children'),
+    Input('opt-cycle-type', 'value')
+)
+def _render_opt_param_configs(opt_cycle_type):
+    """根据循环类型动态渲染参数上下界配置面板"""
+    cfg = CYCLE_CONFIGS.get(opt_cycle_type)
+    if not cfg:
+        return html.Div('请选择循环类型')
+    
+    children = []
+    for p in cfg['params']:
+        key = p['key']
+        label = p['label']
+        unit = p.get('unit', '')
+        pmin = p['min']
+        pmax = p['max']
+        pdefault = p['default']
+        pstep = p.get('step', 0.1)
+        
+        row = html.Div([
+            # Checkbox + 参数名
+            html.Div([
+                dcc.Checklist(
+                    id={'type': 'opt-param-enable', 'index': key},
+                    options=[{'label': f'  {label}', 'value': '1'}],
+                    value=[],
+                    style={'fontSize': 12, 'display': 'inline-block'}
+                ),
+            ], style={'width': '150px', 'flexShrink': 0,
+                      'display': 'flex', 'alignItems': 'center'}),
+            # 单位
+            html.Div(unit,
+                     style={'width': '40px', 'flexShrink': 0,
+                            'color': '#7f8c8d', 'fontSize': 11,
+                            'display': 'flex', 'alignItems': 'center'}),
+            # 下界
+            html.Div([
+                html.Label('下界:', style={'fontSize': 10, 'color': '#7f8c8d',
+                                            'marginRight': 3}),
+                dcc.Input(
+                    id={'type': 'opt-param-min', 'index': key},
+                    type='number', min=pmin, max=pmax, step=pstep,
+                    value=pmin,
+                    style={'width': '70px', 'padding': 3, 'fontSize': 11}
+                ),
+            ], style={'display': 'flex', 'alignItems': 'center',
+                      'flexShrink': 0}),
+            # 上界
+            html.Div([
+                html.Label('上界:', style={'fontSize': 10, 'color': '#7f8c8d',
+                                            'marginRight': 3, 'marginLeft': 8}),
+                dcc.Input(
+                    id={'type': 'opt-param-max', 'index': key},
+                    type='number', min=pmin, max=pmax, step=pstep,
+                    value=pmax,
+                    style={'width': '70px', 'padding': 3, 'fontSize': 11}
+                ),
+            ], style={'display': 'flex', 'alignItems': 'center',
+                      'flexShrink': 0}),
+            # 默认值提示
+            html.Div(f'(默认 {pdefault:g})',
+                     style={'fontSize': 10, 'color': '#aab7b8',
+                            'marginLeft': 8, 'display': 'flex',
+                            'alignItems': 'center'}),
+        ], style={'display': 'flex', 'alignItems': 'center',
+                  'padding': '7px 4px',
+                  'borderBottom': '1px dashed #ecf0f1',
+                  'gap': 2})
+        children.append(row)
+    
+    return html.Div(children)
+
+
+# ============================================================
+# 优化求解器 - 执行优化 (使用后台线程)
+# ============================================================
+
+# 线程共享数据 (简单实现, 不支持多个并行会话)
+_opt_thread = None
+_opt_shared = {
+    'progress': None,
+    'result': None,
+}
+
+
+def _run_optimization_worker(cfg_key, objective,
+                             opt_param_list, fixed_params,
+                             pop_size, n_gen, cx_rate, mut_rate):
+    """在后台线程中运行优化"""
+    def progress_cb(gen, total, best):
+        _opt_shared['progress'] = {
+            'generation': gen,
+            'total': total,
+            'best_fitness': best,
+            'objective': objective,
+        }
+    
+    try:
+        optimizer = GeneticOptimizer(
+            cfg_key=cfg_key,
+            CYCLE_CONFIGS=CYCLE_CONFIGS,
+            objective=objective,
+            opt_param_configs=opt_param_list,
+            fixed_params=fixed_params,
+            pop_size=pop_size,
+            n_generations=n_gen,
+            crossover_rate=cx_rate,
+            mutation_rate=mut_rate,
+            progress_callback=progress_cb,
+        )
+        result = optimizer.run()
+        
+        # 附加信息
+        result['cycle_type'] = cfg_key
+        result['optimized_keys'] = [p['key'] for p in opt_param_list]
+        result['initial_params'] = fixed_params.copy()
+        result['initial_params'].update({
+            p['key']: CYCLE_CONFIGS[cfg_key]['params'][i]['default']
+            for i, p in enumerate(CYCLE_CONFIGS[cfg_key]['params'])
+            if p['key'] not in fixed_params
+        })
+        # 保存初始参数(优化前) = 当前固定值+默认值
+        result['initial_params'] = {
+            p['key']: (fixed_params[p['key']]
+                       if p['key'] in fixed_params
+                       else next((pp['default']
+                                  for pp in CYCLE_CONFIGS[cfg_key]['params']
+                                  if pp['key'] == p['key']),
+                                 p['key']))
+            for p in CYCLE_CONFIGS[cfg_key]['params']
+        }
+        
+        _opt_shared['result'] = result
+        _opt_shared['progress'] = {
+            'generation': n_gen,
+            'total': n_gen,
+            'best_fitness': result.get('best_objective', 0),
+            'objective': objective,
+        }
+    except Exception as e:
+        _opt_shared['result'] = {'error': str(e)}
+        _opt_shared['progress'] = {
+            'generation': 0,
+            'total': 0,
+            'best_fitness': 0,
+            'objective': objective,
+            'error': str(e),
+        }
+
+
+import threading
+
+@app.callback(
+    [Output('optimize-running-store', 'data', allow_duplicate=True),
+     Output('optimize-progress-store', 'data', allow_duplicate=True)],
+    Input('btn-run-optimize', 'n_clicks'),
+    [State('opt-cycle-type', 'value'),
+     State('opt-objective', 'value'),
+     State('opt-pop-size', 'value'),
+     State('opt-n-gen', 'value'),
+     State('opt-cx-rate', 'value'),
+     State('opt-mut-rate', 'value'),
+     State({'type': 'opt-param-enable', 'index': ALL}, 'value'),
+     State({'type': 'opt-param-min', 'index': ALL}, 'value'),
+     State({'type': 'opt-param-max', 'index': ALL}, 'value')],
+    prevent_initial_call=True
+)
+def _start_optimization(n_clicks, cfg_key, objective,
+                        pop_size, n_gen, cx_rate, mut_rate,
+                        enables_all, mins_all, maxs_all):
+    global _opt_thread, _opt_shared
+    
+    if n_clicks == 0:
+        raise PreventUpdate
+    
+    # 获取pattern-matching参数的index列表 (即参数key)
+    ctx = callback_context
+    enable_keys = [
+        inp['id']['index'] for inp in ctx.states_list
+        if isinstance(inp['id'], dict) and inp['id']['type'] == 'opt-param-enable'
+    ]
+    min_keys = [
+        inp['id']['index'] for inp in ctx.states_list
+        if isinstance(inp['id'], dict) and inp['id']['type'] == 'opt-param-min'
+    ]
+    max_keys = [
+        inp['id']['index'] for inp in ctx.states_list
+        if isinstance(inp['id'], dict) and inp['id']['type'] == 'opt-param-max'
+    ]
+    
+    # 构建快速查找字典
+    enable_map = dict(zip(enable_keys, enables_all)) if enable_keys else {}
+    min_map = dict(zip(min_keys, mins_all)) if min_keys else {}
+    max_map = dict(zip(max_keys, maxs_all)) if max_keys else {}
+    
+    cfg = CYCLE_CONFIGS[cfg_key]
+    
+    # 构建优化参数列表和固定参数
+    opt_param_list = []
+    fixed_params = {}
+    
+    for i, p in enumerate(cfg['params']):
+        key = p['key']
+        enabled = (key in enable_map and enable_map[key] and len(enable_map[key]) > 0)
+        if enabled:
+            pmin = min_map.get(key, p['min'])
+            pmax = max_map.get(key, p['max'])
+            if pmin is None:
+                pmin = p['min']
+            if pmax is None:
+                pmax = p['max']
+            # 确保min < max
+            if pmin >= pmax:
+                pmin = p['min']
+                pmax = p['max']
+            opt_param_list.append({
+                'key': key,
+                'min': pmin,
+                'max': pmax,
+            })
+        else:
+            # 未勾选 - 使用默认值
+            fixed_params[key] = p['default']
+    
+    # 验证: 至少有一个优化参数
+    if len(opt_param_list) == 0:
+        return (False, {
+            'generation': 0, 'total': 0, 'best_fitness': 0,
+            'objective': objective,
+            'error': '请至少勾选一个需要优化的参数!'
+        })
+    
+    # 参数默认值校验
+    pop_size = int(max(10, pop_size or 50))
+    n_gen = int(max(5, n_gen or 80))
+    cx_rate = float(np.clip(cx_rate or 0.8, 0.0, 1.0))
+    mut_rate = float(np.clip(mut_rate or 0.1, 0.0, 1.0))
+    
+    # 重置共享数据
+    _opt_shared['progress'] = {
+        'generation': 0,
+        'total': n_gen,
+        'best_fitness': 0,
+        'objective': objective,
+    }
+    _opt_shared['result'] = None
+    
+    # 启动后台线程
+    if _opt_thread and _opt_thread.is_alive():
+        return (True, _opt_shared['progress'])
+    
+    _opt_thread = threading.Thread(
+        target=_run_optimization_worker,
+        args=(cfg_key, objective, opt_param_list, fixed_params,
+              pop_size, n_gen, cx_rate, mut_rate),
+        daemon=True
+    )
+    _opt_thread.start()
+    
+    return (True, _opt_shared['progress'])
+
+
+# ============================================================
+# 优化求解器 - 轮询更新进度和结果
+# ============================================================
+
+# 用一个隐藏的Interval组件来轮询
+app.layout.children.append(
+    dcc.Interval(id='opt-poll-interval', interval=800, n_intervals=0)
+)
+
+
+@app.callback(
+    [Output('optimize-progress-store', 'data'),
+     Output('optimize-result-store', 'data'),
+     Output('optimize-running-store', 'data')],
+    Input('opt-poll-interval', 'n_intervals'),
+    [State('optimize-running-store', 'data'),
+     State('optimize-result-store', 'data'),
+     State('optimize-progress-store', 'data')],
+    prevent_initial_call=False
+)
+def _poll_optimization(n_intervals, is_running, cur_result, cur_progress):
+    """定期检查后台线程的进度和结果"""
+    if not is_running:
+        raise PreventUpdate
+    
+    shared_progress = _opt_shared['progress']
+    shared_result = _opt_shared['result']
+    
+    # 如果有结果了，就标记为结束
+    if shared_result is not None:
+        if 'error' in shared_result:
+            return (
+                shared_progress or {
+                    'generation': 0, 'total': 0, 'best_fitness': 0,
+                    'objective': 'eta', 'error': shared_result['error']
+                },
+                None,
+                False
+            )
+        return (shared_progress, shared_result, False)
+    
+    # 否则返回最新进度
+    if shared_progress is not None and shared_progress != cur_progress:
+        return (shared_progress, cur_result, True)
+    
+    raise PreventUpdate
+
+
+# ============================================================
+# 优化求解器 - 保存为工况
+# ============================================================
+
+@app.callback(
+    [Output('cases-store', 'data', allow_duplicate=True),
+     Output('opt-save-status', 'children'),
+     Output('case-name-input', 'value', allow_duplicate=True)],
+    Input('btn-save-opt-case', 'n_clicks'),
+    [State('optimize-result-store', 'data'),
+     State('cases-store', 'data')],
+    prevent_initial_call=True
+)
+def _save_optimized_case(n_clicks, opt_result, saved_cases):
+    """将优化得到的最优参数保存为工况"""
+    if n_clicks == 0 or not opt_result:
+        raise PreventUpdate
+    
+    saved_cases = saved_cases or []
+    
+    if len(saved_cases) >= MAX_CASES:
+        return (saved_cases,
+                html.Span(f'❌ 工况已达上限{MAX_CASES}',
+                         style={'color': '#c0392b'}),
+                '')
+    
+    cfg_key = opt_result.get('cycle_type')
+    cfg = CYCLE_CONFIGS.get(cfg_key)
+    best_params = opt_result.get('best_params', {})
+    obj_type = opt_result.get('objective_type', 'eta')
+    best_obj = opt_result.get('best_objective', 0)
+    
+    obj_label = 'η' if obj_type == 'eta' else 'Wnet'
+    obj_val_str = (f'{best_obj*100:.2f}%' if obj_type == 'eta'
+                   else f'{best_obj:.2f}')
+    
+    # 重建循环
+    try:
+        cycle, res = build_cycle(cfg_key, best_params)
+    except Exception as e:
+        return (saved_cases,
+                html.Span(f'❌ 重建失败: {str(e)[:30]}',
+                         style={'color': '#c0392b'}),
+                '')
+    
+    # 工况名
+    case_name = f"OPT_{cfg.get('name', '')}_{obj_label}={obj_val_str}"
+    case_name = case_name[:30]
+    
+    # 状态点
+    states_dict = {}
+    for label, sp in cycle.states.items():
+        states_dict[label] = sp.to_dict()
+    
+    case_id = _generate_case_id()
+    case_record = {
+        'id': case_id,
+        'name': case_name,
+        'cycle_type': cfg_key,
+        'cycle_name': cfg.get('name', cfg_key),
+        'params': best_params,
+        'results': _make_serializable(res),
+        'states': states_dict,
+        'fluid_type': _extract_cycle_fluid_type(cfg_key),
+        'color': CASE_COLORS[len(saved_cases) % len(CASE_COLORS)],
+        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    
+    saved_cases.append(case_record)
+    
+    return (
+        saved_cases,
+        html.Span(f'✅ 已保存 "{case_name}" ({len(saved_cases)}/{MAX_CASES})',
+                 style={'color': '#27ae60', 'fontSize': 11}),
+        ''
+    )
 
 
 # ============================================================

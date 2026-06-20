@@ -1,11 +1,27 @@
 """
-参数化分析模块
+参数化分析与优化模块
 - 单参数扫描: 效率/净功 vs 参数
 - 双参数扫描: 等值线图
+- 循环优化求解器: 遗传算法
 """
 
 import numpy as np
 import pandas as pd
+
+from analysis.optimization import (
+    GeneticOptimizer,
+    MIN_QUALITY,
+    _build_cycle_from_params as build_cycle_opt,
+    _check_constraints as check_constraints_opt,
+)
+
+__all__ = [
+    'parametric_sweep',
+    'multi_param_sweep',
+    'exergy_analysis_summary',
+    'GeneticOptimizer',
+    'MIN_QUALITY',
+]
 
 
 def parametric_sweep(cycle_class, cycle_kwargs,
