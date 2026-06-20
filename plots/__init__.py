@@ -385,3 +385,201 @@ def plot_2d_contour(x_vals, y_vals, z_mtx,
                         ylabel=f'{y_name} [{y_unit}]')
     )
     return fig
+
+
+def plot_superimposed_Ts(cycles_data, title='多工况T-s图对比'):
+    """
+    在同一张T-s图上叠加多个工况的循环路径
+    cycles_data: list of dict
+      {
+        'name': 工况名,
+        'cycle': cycle对象 (有states和processes属性),
+        'fluid_type': 'water' 或 'gas'  (决定线型)
+        'color': 颜色
+      }
+    """
+    fig = go.Figure()
+    
+    # 绘制饱和线 (只绘制一次,用于水蒸汽工况)
+    has_water = any(cd['fluid_type'] == 'water' for cd in cycles_data)
+    if has_water:
+        plot_saturation_curve_Ts(fig)
+    
+    # 预设颜色
+    default_colors = ['#e74c3c', '#3498db', '#27ae60', '#f39c12', 
+                      '#8e44ad', '#16a085', '#2c3e50', '#d35400']
+    
+    for i, cd in enumerate(cycles_data):
+        name = cd.get('name', f'工况{i+1}')
+        cycle = cd['cycle']
+        fluid_type = cd.get('fluid_type', 'water')
+        color = cd.get('color', default_colors[i % len(default_colors)])
+        
+        # 线型: 水用实线, 气体用虚线
+        dash_style = 'solid' if fluid_type == 'water' else 'dash'
+        line_width = 3 if fluid_type == 'water' else 2.5
+        
+        states = cycle.states
+        processes = cycle.processes
+        
+        # 绘制过程路径
+        for (l1, l2, ptype) in processes:
+            if l1 in states and l2 in states:
+                s1, s2 = states[l1].s, states[l2].s
+                T1, T2 = states[l1].T - 273.15, states[l2].T - 273.15
+                
+                show_legend = (ptype == processes[0][2])  # 只在第一个过程显示图例
+                
+                fig.add_trace(go.Scatter(
+                    x=[s1, s2], y=[T1, T2],
+                    mode='lines+markers',
+                    name=name,
+                    legendgroup=name,
+                    showlegend=show_legend,
+                    line=dict(color=color, width=line_width, dash=dash_style),
+                    marker=dict(size=7, color=color, symbol='circle'),
+                    hovertemplate=f'<b>{name}</b><br>{l1}→{l2}: {ptype}<br>' +
+                                  's=%{x:.3f} kJ/(kg·K)<br>T=%{y:.1f}°C<extra></extra>'
+                ))
+        
+        # 标注状态点 (只标注第一个和最后一个,避免拥挤)
+        key_labels = sorted(states.keys())
+        for label in [key_labels[0], key_labels[-1]] if len(key_labels) >= 2 else key_labels:
+            sp = states[label]
+            if sp.s is not None and sp.T is not None:
+                fig.add_annotation(
+                    x=sp.s, y=sp.T - 273.15,
+                    text=f"<b>{name}</b><br>{label}",
+                    showarrow=True, arrowhead=1, arrowsize=1,
+                    ax=15, ay=-15,
+                    font=dict(size=10, color=color),
+                    bgcolor='rgba(255,255,255,0.85)',
+                    bordercolor=color, borderwidth=1,
+                )
+    
+    # 图例说明线型含义
+    if has_water and any(cd['fluid_type'] == 'gas' for cd in cycles_data):
+        fig.add_annotation(
+            x=0.02, y=0.02, xref='paper', yref='paper',
+            text='— 实线: 水/水蒸气工质 &nbsp;&nbsp; -- 虚线: 气体工质',
+            showarrow=False,
+            font=dict(size=11),
+            bgcolor='rgba(255,255,255,0.9)',
+            bordercolor='#ccc', borderwidth=1,
+        )
+    
+    fig.update_layout(
+        **_plotly_layout(title,
+                        xlabel='比熵 s [kJ/(kg·K)]',
+                        ylabel='温度 T [°C]')
+    )
+    fig.update_layout(
+        legend=dict(x=0.98, y=0.98, xanchor='right', yanchor='top',
+                   bgcolor='rgba(255,255,255,0.9)',
+                   bordercolor='#ccc', borderwidth=1)
+    )
+    return fig
+
+
+def plot_comparison_radar(cases_data, title='多工况综合性能雷达图'):
+    """
+    雷达图: 五维度对比
+      - 热效率 η
+      - 净功 w_net (归一化)
+      - 㶲效率
+      - 1 - 放热率 (q_out/q_in → 越低越好,取倒数)
+      - 紧凑性 (1/比体积变化)
+    
+    cases_data: list of dict
+      {
+        'name': 工况名,
+        'eta': 热效率,
+        'w_net': 净功 kJ/kg,
+        'exergy_eff': 㶲效率,
+        'heat_rejection_ratio': q_out/q_in,
+        'compactness': 紧凑性指标 (1/Δv),
+        'color': 颜色 (可选)
+      }
+    """
+    default_colors = ['#e74c3c', '#3498db', '#27ae60', '#f39c12',
+                      '#8e44ad', '#16a085', '#2c3e50', '#d35400']
+    
+    categories = ['热效率 η', '净功输出', '㶲效率', '热量利用率\n(1-q_out/q_in)', '紧凑性']
+    
+    fig = go.Figure()
+    
+    # 归一化: 找出每个维度的最大值作为参考 (紧凑性可能有特殊处理)
+    max_vals = {
+        'eta': max(max(cd.get('eta', 0) for cd in cases_data), 1e-6),
+        'w_net': max(max(abs(cd.get('w_net', 0)) for cd in cases_data), 1e-6),
+        'exergy_eff': max(max(cd.get('exergy_eff', 0) for cd in cases_data), 1e-6),
+        'heat_util': max(max(max(1 - cd.get('heat_rejection_ratio', 0), 0) for cd in cases_data), 1e-6),
+        'compactness': max(max(cd.get('compactness', 0) for cd in cases_data), 1e-6),
+    }
+    
+    for i, cd in enumerate(cases_data):
+        name = cd.get('name', f'工况{i+1}')
+        color = cd.get('color', default_colors[i % len(default_colors)])
+        
+        # 各维度值 (归一化到0-1, 再转为百分比显示)
+        eta_norm = cd.get('eta', 0) / max_vals['eta'] * 100
+        wnet_norm = abs(cd.get('w_net', 0)) / max_vals['w_net'] * 100
+        exergy_norm = cd.get('exergy_eff', 0) / max_vals['exergy_eff'] * 100
+        heat_util_norm = max(1 - cd.get('heat_rejection_ratio', 0), 0) / max_vals['heat_util'] * 100
+        compact_norm = cd.get('compactness', 0) / max_vals['compactness'] * 100
+        
+        r_values = [eta_norm, wnet_norm, exergy_norm, heat_util_norm, compact_norm]
+        
+        # 闭合雷达图
+        r_values_closed = r_values + [r_values[0]]
+        theta_closed = categories + [categories[0]]
+        
+        # 实际值hover显示
+        hover_texts = [
+            f'{name}<br>热效率: {cd.get("eta",0)*100:.2f}%',
+            f'{name}<br>净功: {cd.get("w_net",0):.2f} kJ/kg',
+            f'{name}<br>㶲效率: {cd.get("exergy_eff",0)*100:.2f}%',
+            f'{name}<br>热量利用率: {max(1-cd.get("heat_rejection_ratio",0),0)*100:.2f}%',
+            f'{name}<br>紧凑性: {cd.get("compactness",0):.4f}',
+            f'{name}<br>热效率: {cd.get("eta",0)*100:.2f}%',
+        ]
+        
+        fig.add_trace(go.Scatterpolar(
+            r=r_values_closed,
+            theta=theta_closed,
+            fill='toself',
+            name=name,
+            fillcolor=color,
+            opacity=0.25,
+            line=dict(color=color, width=2.5),
+            marker=dict(size=7, color=color),
+            hovertext=hover_texts,
+            hoverinfo='text',
+        ))
+    
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(
+                visible=True,
+                range=[0, 105],
+                tickfont=dict(size=10),
+                gridcolor='lightgray',
+                title=dict(text='归一化值 (%)', font=dict(size=10))
+            ),
+            angularaxis=dict(
+                tickfont=dict(size=12, color='#2c3e50'),
+                gridcolor='lightgray',
+                linecolor='#2c3e50',
+            ),
+            bgcolor='#fafafa'
+        ),
+        title=dict(text=title, font=dict(size=16), x=0.5),
+        height=600,
+        width=800,
+        legend=dict(x=0.98, y=0.02, xanchor='right', yanchor='bottom',
+                   bgcolor='rgba(255,255,255,0.9)',
+                   bordercolor='#ccc', borderwidth=1),
+        paper_bgcolor='white',
+        margin=dict(l=80, r=80, t=80, b=60),
+    )
+    return fig

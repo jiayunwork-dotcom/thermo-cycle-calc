@@ -30,7 +30,8 @@ from cycles.combined import CombinedCycle
 
 from plots import (
     plot_Ts_diagram, plot_Pv_diagram, plot_hs_diagram,
-    plot_exergy_bar, plot_parametric_curve, plot_2d_contour
+    plot_exergy_bar, plot_parametric_curve, plot_2d_contour,
+    plot_superimposed_Ts, plot_comparison_radar
 )
 from analysis import parametric_sweep, multi_param_sweep, exergy_analysis_summary
 from export_utils import (
@@ -291,7 +292,78 @@ app.layout = html.Div([
                                       'width': '100%'}),
                 ]),
                 dcc.Download(id='download-file'),
+                dcc.Download(id='download-compare-png'),
+                dcc.Download(id='download-compare-csv'),
             ], style={'marginBottom': 18}),
+            
+            # ====== 工况管理模块 ======
+            html.Div([
+                html.Label('📁 工况管理 (最多8组)', 
+                          style={'fontWeight': 'bold', 'display': 'block',
+                                 'marginBottom': 8, 'fontSize': 13}),
+                
+                # 保存工况
+                html.Div([
+                    html.Div([
+                        dcc.Input(id='case-name-input', type='text',
+                                  placeholder='输入工况名称...',
+                                  value='',
+                                  style={'width': '65%', 'padding': 6,
+                                         'borderRadius': 4, 'border': '1px solid #ccc',
+                                         'fontSize': 12}),
+                        html.Button('💾 保存当前工况', id='btn-save-case', n_clicks=0,
+                                   style={'background': '#2980b9', 'color': 'white',
+                                          'border': 'none', 'padding': '6px 10px',
+                                          'borderRadius': 4, 'fontSize': 12,
+                                          'cursor': 'pointer', 'width': '32%',
+                                          'marginLeft': '3%'}),
+                    ], style={'display': 'flex', 'marginBottom': 10}),
+                    html.Div(id='case-save-status', style={'fontSize': 11,
+                                                           'marginBottom': 8,
+                                                           'minHeight': '16px'}),
+                ]),
+                
+                # 工况列表
+                html.Div(id='saved-cases-list',
+                        style={'maxHeight': '240px', 'overflowY': 'auto',
+                               'padding': 4, 'background': '#f8f9fa',
+                               'borderRadius': 6, 'border': '1px solid #dee2e6',
+                               'minHeight': '60px'}),
+                
+                # 对比操作
+                html.Div([
+                    html.Div([
+                        html.Label('选择对比模式:',
+                                  style={'fontSize': 12, 'display': 'block',
+                                         'marginBottom': 4}),
+                        dcc.Dropdown(
+                            id='compare-mode',
+                            options=[
+                                {'label': '总览对比 (2~4组)', 'value': 'overview'},
+                                {'label': '敏感度分析 (2组)', 'value': 'sensitivity'},
+                            ],
+                            value='overview',
+                            clearable=False,
+                            style={'fontSize': 12, 'marginBottom': 8}
+                        ),
+                    ]),
+                    html.Button('📊 开始对比', id='btn-start-compare', n_clicks=0,
+                               style={'background': '#8e44ad', 'color': 'white',
+                                      'border': 'none', 'padding': '8px 16px',
+                                      'borderRadius': 4, 'fontSize': 13,
+                                      'cursor': 'pointer', 'width': '100%',
+                                      'fontWeight': 'bold'}),
+                ], style={'marginTop': 12, 'padding': 10,
+                         'background': '#eaf2f8', 'borderRadius': 6,
+                         'border': '1px solid #aed6f1'}),
+                
+                html.Div(id='compare-error-msg',
+                        style={'marginTop': 8, 'fontSize': 12, 'color': '#c0392b',
+                               'minHeight': '16px'}),
+                
+            ], style={'padding': 12, 'background': 'white',
+                     'borderRadius': 8, 'border': '1px solid #dee2e6',
+                     'marginBottom': 18}),
             
             # 状态点查询工具
             html.Div([
@@ -338,6 +410,10 @@ app.layout = html.Div([
                        style={'padding': 10, 'fontWeight': 'bold'}),
                 dcc.Tab(label='📊 参数化分析', value='tab-parametric',
                        style={'padding': 10, 'fontWeight': 'bold'}),
+                dcc.Tab(label='🔬 工况对比', value='tab-compare',
+                       style={'padding': 10, 'fontWeight': 'bold',
+                              'background': 'linear-gradient(135deg, #e8daef, #d6eaf8)',
+                              'color': '#6c3483'}),
             ], style={'marginBottom': 12}),
             
             html.Div(id='tab-content'),
@@ -348,6 +424,12 @@ app.layout = html.Div([
     
     # 隐藏的存储
     dcc.Store(id='cycle-data-store'),
+    # 工况存储: list of case dicts
+    dcc.Store(id='cases-store', data=[]),
+    # 对比结果存储
+    dcc.Store(id='compare-result-store', data=None),
+    # 工况选择状态存储 (保存勾选的工况ID)
+    dcc.Store(id='cases-selection-store', data=[]),
     
 ], style={'fontFamily': 'PingFang SC, Microsoft YaHei, Arial, sans-serif'})
 
@@ -481,12 +563,50 @@ def _make_serializable(obj):
         return obj
 
 
-# Tab内容渲染
+# Tab内容渲染 (统一处理所有tabs)
 @app.callback(Output('tab-content', 'children'),
               [Input('tabs', 'value'),
                Input('cycle-data-store', 'data'),
-               Input('diagram-type', 'value')])
-def render_tab(tab, store_data, diagram_type):
+               Input('diagram-type', 'value'),
+               Input('compare-result-store', 'data')])
+def render_tab(tab, store_data, diagram_type, compare_result):
+    # ====== 工况对比Tab (独立处理) ======
+    if tab == 'tab-compare':
+        if not compare_result:
+            return html.Div([
+                html.Div([
+                    html.H3('🔬 工况对比分析',
+                           style={'marginTop': 0, 'color': '#6c3483'}),
+                    html.Div([
+                        html.P('使用说明:', style={'fontWeight': 'bold',
+                                                   'color': '#2c3e50'}),
+                        html.Ol([
+                            html.Li('在左侧"工况管理"区域，完成计算后点击"💾 保存当前工况"将结果保存（可命名）'),
+                            html.Li('在已保存工况列表中勾选2~4个工况'),
+                            html.Li('选择对比模式：'),
+                            html.Ul([
+                                html.Li('总览对比 (2~4组): 关键指标表 + 叠加T-s图 + 雷达图'),
+                                html.Li('敏感度分析 (2组): 两工况参数差异对指标的影响分析'),
+                            ], style={'marginLeft': 20}),
+                            html.Li('点击"📊 开始对比"按钮查看结果'),
+                        ], style={'lineHeight': 1.8}),
+                    ], style={'padding': 20, 'background': '#f8f9fa',
+                             'borderRadius': 8, 'borderLeft': '4px solid #8e44ad',
+                             'marginTop': 16}),
+                ], style={'maxWidth': 800, 'margin': '0 auto'}),
+            ], style={'padding': 20})
+        
+        mode = compare_result.get('mode', 'overview')
+        cases = compare_result.get('cases', [])
+        
+        if mode == 'overview':
+            return _render_compare_overview(cases, compare_result)
+        elif mode == 'sensitivity':
+            return _render_compare_sensitivity(cases, compare_result)
+        else:
+            return html.Div('未知对比模式')
+    
+    # ====== 其他Tab ======
     if not store_data:
         return html.Div('加载中...')
     
@@ -503,7 +623,16 @@ def render_tab(tab, store_data, diagram_type):
     try:
         cycle, res = build_cycle(cycle_type, param_values)
     except:
-        return html.Div('无法重新构建循环数据')
+        if tab == 'tab-diagram':
+            return _render_diagram_tab(None, {}, diagram_type)
+        elif tab == 'tab-states':
+            return html.Div('无法重新构建循环数据')
+        elif tab == 'tab-exergy':
+            return _render_exergy_tab(None, {})
+        elif tab == 'tab-parametric':
+            return _render_parametric_tab(cycle_type)
+        else:
+            return html.Div()
     
     if tab == 'tab-diagram':
         return _render_diagram_tab(cycle, res, diagram_type)
@@ -1033,6 +1162,1116 @@ def handle_export(n_pdf, n_svg, n_csv, cycle_type, diagram_type, *all_params):
             return dict(content=f'PDF生成失败: {msg}', filename='error.txt')
     
     raise PreventUpdate
+
+
+# ============================================================
+# 工况对比功能 - 辅助函数
+# ============================================================
+
+MAX_CASES = 8
+CASE_COLORS = ['#e74c3c', '#3498db', '#27ae60', '#f39c12',
+               '#8e44ad', '#16a085', '#2c3e50', '#d35400']
+
+
+def _generate_case_id():
+    """生成唯一工况ID"""
+    return f"case_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+
+
+def _extract_cycle_fluid_type(cycle_type):
+    """判断循环工质类型: water 或 gas"""
+    water_cycles = {'rankine_basic', 'rankine_reheat', 'rankine_regen'}
+    gas_cycles = {'brayton_basic', 'brayton_regen', 'otto', 'diesel'}
+    if cycle_type in water_cycles:
+        return 'water'
+    elif cycle_type in gas_cycles:
+        return 'gas'
+    elif cycle_type == 'ccgt':
+        return 'mixed'
+    return 'water'
+
+
+def _compute_exergy_eff(results):
+    """计算㶲效率"""
+    w_net = results.get('w_net', results.get('W_dot_total_kW', 0))
+    q_in = results.get('q_in', 0)
+    T0 = 298.15
+    # 估计热源温度: 用锅炉出口温度或TIT
+    T_h_est = None
+    # 从结果中可能没有，用一个合理的高温估计
+    if T_h_est is None:
+        T_h_est = 1000  # K 近似
+    exergy_input = q_in * (1 - T0 / T_h_est) if q_in > 0 else 0
+    if exergy_input > 0:
+        return w_net / exergy_input
+    return 0
+
+
+def _compute_compactness(cycle):
+    """计算紧凑性指标: 1 / max(比体积变化)"""
+    try:
+        vs = [sp.v for sp in cycle.states.values() if sp.v and sp.v > 0]
+        if len(vs) >= 2:
+            delta_v = max(vs) / min(vs)
+            return 1.0 / delta_v if delta_v > 0 else 0
+    except:
+        pass
+    return 0.01
+
+
+def _rebuild_cycle_from_case(case_data):
+    """从保存的工况数据重建循环对象"""
+    cycle_type = case_data['cycle_type']
+    params = case_data['params']
+    try:
+        cycle, res = build_cycle(cycle_type, params)
+        return cycle, res
+    except:
+        return None, None
+
+
+# ============================================================
+# 工况对比功能 - 回调函数
+# ============================================================
+
+# ---- 1. 保存工况 ----
+@app.callback(
+    [Output('cases-store', 'data'),
+     Output('case-save-status', 'children'),
+     Output('case-name-input', 'value')],
+    [Input('btn-save-case', 'n_clicks')],
+    [State('cycle-type', 'value'),
+     State('case-name-input', 'value'),
+     State('cases-store', 'data'),
+     State('cycle-data-store', 'data')] +
+    [State(f"param-{k}-{p['key']}", 'value') 
+     for k in CYCLE_CONFIGS 
+     for p in CYCLE_CONFIGS[k]['params']],
+    prevent_initial_call=True
+)
+def save_case(n_clicks, cycle_type, case_name, saved_cases, store_data, *all_params):
+    if n_clicks == 0 or not store_data:
+        raise PreventUpdate
+    
+    saved_cases = saved_cases or []
+    
+    # 检查上限
+    if len(saved_cases) >= MAX_CASES:
+        return saved_cases, html.Span(f'❌ 已达最大工况数({MAX_CASES})，请先删除部分工况',
+                                      style={'color': '#c0392b'}), case_name
+    
+    # 收集当前参数
+    cfg = CYCLE_CONFIGS[cycle_type]
+    param_dict = {}
+    idx = 0
+    for ck in CYCLE_CONFIGS:
+        for p in CYCLE_CONFIGS[ck]['params']:
+            if ck == cycle_type and idx < len(all_params):
+                if all_params[idx] is not None:
+                    param_dict[p['key']] = all_params[idx]
+                else:
+                    param_dict[p['key']] = p['default']
+            idx += 1
+    
+    # 重建循环以获取完整状态点数据
+    try:
+        cycle, res = build_cycle(cycle_type, param_dict)
+    except Exception as e:
+        return saved_cases, html.Span(f'❌ 保存失败: {str(e)[:40]}',
+                                      style={'color': '#c0392b'}), case_name
+    
+    # 工况名称
+    if not case_name or case_name.strip() == '':
+        case_name = f"{cfg['name']}_{len(saved_cases)+1}"
+    case_name = case_name.strip()[:30]
+    
+    # 提取状态点数据 (转为可序列化格式)
+    states_dict = {}
+    for label, sp in cycle.states.items():
+        states_dict[label] = sp.to_dict()
+    
+    # 创建工况记录
+    case_id = _generate_case_id()
+    case_record = {
+        'id': case_id,
+        'name': case_name,
+        'cycle_type': cycle_type,
+        'cycle_name': cfg['name'],
+        'params': param_dict,
+        'results': _make_serializable(res),
+        'states': states_dict,
+        'fluid_type': _extract_cycle_fluid_type(cycle_type),
+        'color': CASE_COLORS[len(saved_cases) % len(CASE_COLORS)],
+        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    
+    saved_cases.append(case_record)
+    
+    status = html.Span(f'✅ 已保存工况 "{case_name}" ({len(saved_cases)}/{MAX_CASES})',
+                       style={'color': '#27ae60'})
+    
+    return saved_cases, status, ''
+
+
+# ---- 2. 渲染工况列表 ----
+@app.callback(
+    Output('saved-cases-list', 'children'),
+    [Input('cases-store', 'data'),
+     Input('cases-selection-store', 'data')]
+)
+def render_cases_list(saved_cases, selection):
+    saved_cases = saved_cases or []
+    selection = selection or []
+    
+    if not saved_cases:
+        return html.Div([
+            html.Div('📭 暂无保存的工况',
+                    style={'textAlign': 'center', 'padding': 20,
+                           'color': '#95a5a6', 'fontSize': 12})
+        ])
+    
+    children = []
+    for i, case in enumerate(saved_cases):
+        cid = case['id']
+        color = case.get('color', CASE_COLORS[i % len(CASE_COLORS)])
+        is_checked = cid in selection
+        
+        row = html.Div([
+            # 颜色标识
+            html.Div(style={'width': 4, 'background': color,
+                           'borderRadius': 2, 'marginRight': 8}),
+            # 勾选框
+            dcc.Checklist(
+                options=[{'label': '', 'value': cid}],
+                value=[cid] if is_checked else [],
+                id={'type': 'case-checkbox', 'index': cid},
+                style={'display': 'inline-block', 'marginRight': 6,
+                       'marginTop': 2}
+            ),
+            # 工况信息
+            html.Div([
+                html.Div([
+                    html.Strong(case['name'], style={'fontSize': 12}),
+                    html.Span(f" ({case['cycle_name']})",
+                             style={'fontSize': 10, 'color': '#7f8c8d',
+                                    'marginLeft': 4}),
+                ]),
+                html.Div([
+                    html.Span(f"η={case.get('results',{}).get('eta',case.get('results',{}).get('eta_total',0))*100:.1f}%",
+                             style={'fontSize': 10, 'color': '#2c3e50'}),
+                    html.Span(f" · W={case.get('results',{}).get('w_net',case.get('results',{}).get('W_dot_total_kW',0)):.1f}",
+                             style={'fontSize': 10, 'color': '#2c3e50', 'marginLeft': 6}),
+                    html.Span(f" · {case.get('created_at','')[5:16]}",
+                             style={'fontSize': 9, 'color': '#bdc3c7', 'marginLeft': 6}),
+                ], style={'marginTop': 2}),
+            ], style={'flex': 1, 'minWidth': 0}),
+            # 操作按钮
+            html.Div([
+                # 重命名按钮
+                html.Button('✏️', id={'type': 'btn-rename', 'index': cid},
+                           title='重命名', n_clicks=0,
+                           style={'background': 'transparent', 'border': 'none',
+                                  'cursor': 'pointer', 'fontSize': 12,
+                                  'padding': '2px 4px'}),
+                # 删除按钮
+                html.Button('🗑️', id={'type': 'btn-delete', 'index': cid},
+                           title='删除', n_clicks=0,
+                           style={'background': 'transparent', 'border': 'none',
+                                  'cursor': 'pointer', 'fontSize': 12,
+                                  'padding': '2px 4px', 'color': '#e74c3c'}),
+            ], style={'display': 'flex', 'gap': 2}),
+        ], style={'display': 'flex', 'alignItems': 'flex-start',
+                  'padding': '6px 4px', 'borderBottom': '1px solid #ecf0f1',
+                  'gap': 2})
+        children.append(row)
+    
+    return html.Div(children)
+
+
+# ---- 3. 工况选择状态同步 ----
+@app.callback(
+    Output('cases-selection-store', 'data'),
+    [Input({'type': 'case-checkbox', 'index': dash.ALL}, 'value')],
+    [State('cases-selection-store', 'data'),
+     State('cases-store', 'data')],
+    prevent_initial_call=False
+)
+def sync_case_selection(checkbox_values, current_selection, saved_cases):
+    ctx = callback_context
+    if not ctx.triggered:
+        return current_selection or []
+    
+    saved_cases = saved_cases or []
+    valid_ids = {c['id'] for c in saved_cases}
+    new_selection = []
+    
+    # checkbox_values 是一个 list of list (每个checklist的value)
+    for vals in checkbox_values:
+        if isinstance(vals, list):
+            for v in vals:
+                if v in valid_ids and v not in new_selection:
+                    new_selection.append(v)
+    
+    return new_selection
+
+
+# ---- 4. 删除工况 ----
+@app.callback(
+    Output('cases-store', 'data', allow_duplicate=True),
+    [Input({'type': 'btn-delete', 'index': dash.ALL}, 'n_clicks')],
+    [State('cases-store', 'data')],
+    prevent_initial_call=True
+)
+def delete_case(delete_clicks, saved_cases):
+    ctx = callback_context
+    if not ctx.triggered or not saved_cases:
+        raise PreventUpdate
+    
+    # 找到被点击的按钮ID
+    triggered = ctx.triggered[0]
+    prop_id = triggered['prop_id']
+    # 解析 pattern-matching ID
+    try:
+        import json as _json
+        id_dict = _json.loads(prop_id.split('.')[0])
+        case_id = id_dict.get('index')
+    except:
+        raise PreventUpdate
+    
+    new_cases = [c for c in saved_cases if c['id'] != case_id]
+    # 重新分配颜色
+    for i, c in enumerate(new_cases):
+        c['color'] = CASE_COLORS[i % len(CASE_COLORS)]
+    return new_cases
+
+
+# ---- 5. 重命名工况 (打开输入对话框, 简化实现: 用dcc.Input在弹窗, 这里简化为用confirmDialog) ----
+# 简化版: 点击重命名按钮后弹出prompt对话框让用户输入
+# 由于Dash没有原生prompt, 这里用一个隐藏的div+input作为重命名模态框
+# 为简化代码, 我们添加一个单独的回调, 使用store传递重命名信息
+
+# 先在layout中添加, 这里用一个简单方案: 直接用一个小输入框作为行内编辑
+# 考虑到复杂性, 我们采用另一种方式: 用存储+callback处理重命名
+# 这里简化: 点击重命名按钮后, 在case-name-input中填入原名, 并提示覆盖
+@app.callback(
+    [Output('case-name-input', 'value', allow_duplicate=True),
+     Output('case-save-status', 'children', allow_duplicate=True)],
+    [Input({'type': 'btn-rename', 'index': dash.ALL}, 'n_clicks')],
+    [State('cases-store', 'data')],
+    prevent_initial_call=True
+)
+def prepare_rename_case(rename_clicks, saved_cases):
+    ctx = callback_context
+    if not ctx.triggered or not saved_cases:
+        raise PreventUpdate
+    
+    triggered = ctx.triggered[0]
+    if float(triggered.get('value', 0)) == 0:
+        raise PreventUpdate
+    
+    try:
+        import json as _json
+        prop_id = triggered['prop_id']
+        id_dict = _json.loads(prop_id.split('.')[0])
+        case_id = id_dict.get('index')
+    except:
+        raise PreventUpdate
+    
+    case = next((c for c in saved_cases if c['id'] == case_id), None)
+    if not case:
+        raise PreventUpdate
+    
+    # 在状态中标记需要重命名的ID (用status显示提示, 实际保存时如果名称已存在会覆盖同名)
+    # 简化: 填入输入框, 用户编辑后点击保存会检测并询问(简化为直接更新)
+    # 这里我们将重命名功能改为: 直接修改并保存
+    # 为了支持真实重命名, 我们增加一个store: rename-target-id
+    return (case['name'], 
+            html.Span(f'📝 正在重命名 "{case["name"]}", 修改名称后再次点击"保存"会更新此工况 (先删除再保存)', 
+                     style={'color': '#2980b9'}))
+
+
+# ============================================================
+# 工况对比 - 执行对比
+# ============================================================
+
+@app.callback(
+    [Output('compare-result-store', 'data'),
+     Output('compare-error-msg', 'children')],
+    [Input('btn-start-compare', 'n_clicks')],
+    [State('cases-store', 'data'),
+     State('cases-selection-store', 'data'),
+     State('compare-mode', 'value')],
+    prevent_initial_call=True
+)
+def execute_compare(n_clicks, saved_cases, selection, compare_mode):
+    if n_clicks == 0 or not saved_cases or not selection:
+        raise PreventUpdate
+    
+    selected_cases = [c for c in saved_cases if c['id'] in selection]
+    n_selected = len(selected_cases)
+    
+    if compare_mode == 'overview':
+        if n_selected < 2 or n_selected > 4:
+            return None, html.Span(f'❌ 总览对比需选择2-4组工况 (当前选了{n_selected}组)')
+    elif compare_mode == 'sensitivity':
+        if n_selected != 2:
+            return None, html.Span(f'❌ 敏感度分析需恰好选择2组工况 (当前选了{n_selected}组)')
+    
+    # 构建对比数据
+    compare_result = {
+        'mode': compare_mode,
+        'cases': selected_cases,
+        'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    
+    return compare_result, ''
+
+
+
+# ============================================================
+# 对比 - 总览视图
+# ============================================================
+
+def _render_compare_overview(cases, compare_result):
+    """渲染总览对比: 指标表 + 叠加T-s图 + 雷达图"""
+    
+    # --- 1. 总览表数据准备 ---
+    metrics = [
+        ('热效率 η', 'eta', '%', True),       # (名称, key, 单位, 越高越好)
+        ('Carnot效率', 'eta_carnot', '%', True),
+        ('净输出功', 'w_net', 'kJ/kg', True),
+        ('吸热量', 'q_in', 'kJ/kg', None),
+        ('放热量', 'q_out', 'kJ/kg', False),
+        ('㶲效率', 'exergy_eff', '%', True),
+        ('(1-放热率)', 'heat_util', '%', True),
+    ]
+    
+    # 提取各工况的指标值
+    case_metrics = []
+    for case in cases:
+        res = case.get('results', {})
+        # 重建循环以计算一些附加指标
+        cycle, _ = _rebuild_cycle_from_case(case)
+        
+        eta = res.get('eta', res.get('eta_total', 0)) or 0
+        eta_carnot = res.get('eta_carnot', 0) or 0
+        w_net = res.get('w_net', res.get('W_dot_total_kW', 0)) or 0
+        q_in = res.get('q_in', 0) or 0
+        q_out = res.get('q_out', 0) or 0
+        
+        exergy_eff = _compute_exergy_eff(res)
+        heat_util = 1 - (q_out / q_in) if q_in > 0 else 0
+        
+        case_metrics.append({
+            'case': case,
+            'cycle': cycle,
+            'eta': eta,
+            'eta_carnot': eta_carnot,
+            'w_net': w_net,
+            'q_in': q_in,
+            'q_out': q_out,
+            'exergy_eff': exergy_eff,
+            'heat_util': heat_util,
+        })
+    
+    # 找每列最优和最差
+    def _find_extremes(key, higher_better):
+        vals = [cm[key] for cm in case_metrics]
+        if higher_better is True:
+            return max(vals), min(vals)
+        elif higher_better is False:
+            return min(vals), max(vals)
+        else:
+            return None, None
+    
+    # --- 2. 构建总览表 ---
+    table_header = ['指标', '单位'] + [cm['case']['name'] for cm in case_metrics]
+    table_rows = []
+    
+    for metric_name, metric_key, unit, higher_better in metrics:
+        row_vals = []
+        vals = [cm[metric_key] for cm in case_metrics]
+        best_val, worst_val = _find_extremes(metric_key, higher_better)
+        
+        for i, cm in enumerate(case_metrics):
+            val = cm[metric_key]
+            if unit == '%':
+                val_str = f'{val*100:.2f}%'
+            else:
+                val_str = f'{val:.2f}'
+            
+            # 标记颜色
+            style = {}
+            if higher_better is not None and len(case_metrics) >= 2:
+                if abs(val - best_val) < 1e-9:
+                    style = {'backgroundColor': '#d4efdf',
+                             'color': '#186a3b', 'fontWeight': 'bold'}
+                elif abs(val - worst_val) < 1e-9:
+                    style = {'backgroundColor': '#fadbd8',
+                             'color': '#922b21', 'fontWeight': 'bold'}
+            
+            row_vals.append(html.Td(val_str, style=style))
+        
+        table_rows.append(html.Tr(
+            [html.Td(html.Strong(metric_name),
+                    style={'backgroundColor': '#f2f3f4',
+                           'padding': '8px 12px'}),
+             html.Td(unit, style={'color': '#7f8c8d',
+                                 'padding': '8px 12px'})] + row_vals
+        ))
+    
+    overview_table = html.Div([
+        html.H4('📋 对比总览表', style={'marginTop': 0, 'color': '#6c3483'}),
+        html.Div([
+            html.Span('✅ 绿色加粗 = 最优值', 
+                     style={'background': '#d4efdf', 'padding': '4px 10px',
+                            'borderRadius': 4, 'fontSize': 12, 'marginRight': 10}),
+            html.Span('⚠️ 红色加粗 = 最差值', 
+                     style={'background': '#fadbd8', 'padding': '4px 10px',
+                            'borderRadius': 4, 'fontSize': 12}),
+        ], style={'marginBottom': 10}),
+        html.Table([
+            html.Thead(html.Tr(
+                [html.Th(h, style={'backgroundColor': '#8e44ad',
+                                  'color': 'white', 'padding': '10px 14px',
+                                  'textAlign': 'left'})
+                 for h in table_header]
+            )),
+            html.Tbody(table_rows),
+        ], style={'width': '100%', 'borderCollapse': 'collapse',
+                  'fontSize': 13, 'marginBottom': 20,
+                  'background': 'white'}),
+    ], style={'padding': 16, 'background': '#faf5fc',
+              'borderRadius': 8, 'border': '1px solid #d7bde2',
+              'marginBottom': 20})
+    
+    # --- 3. 叠加T-s图 ---
+    cycles_data = []
+    for cm in case_metrics:
+        case = cm['case']
+        cycle = cm['cycle']
+        if cycle:
+            cycles_data.append({
+                'name': case['name'],
+                'cycle': cycle,
+                'fluid_type': case.get('fluid_type', 'water'),
+                'color': case.get('color', '#3498db'),
+            })
+    
+    ts_fig = plot_superimposed_Ts(
+        cycles_data, 
+        title=f'叠加T-s图 - {len(cases)}组工况对比'
+    ) if cycles_data else go.Figure()
+    
+    ts_plot_div = html.Div([
+        html.H4('🗺️ 叠加T-s图 (多工况循环路径)',
+               style={'marginTop': 0, 'color': '#6c3483'}),
+        dcc.Graph(id='compare-ts-figure', figure=ts_fig,
+                 style={'height': '550px'})
+    ], style={'padding': 16, 'background': '#f8f9fa',
+              'borderRadius': 8, 'border': '1px solid #dee2e6',
+              'marginBottom': 20})
+    
+    # --- 4. 雷达图 ---
+    radar_cases = []
+    for cm in case_metrics:
+        case = cm['case']
+        cycle = cm['cycle']
+        compactness = _compute_compactness(cycle) if cycle else 0.01
+        q_in = cm['q_in']
+        heat_rej_ratio = cm['q_out'] / q_in if q_in > 0 else 0
+        
+        radar_cases.append({
+            'name': case['name'],
+            'eta': cm['eta'],
+            'w_net': cm['w_net'],
+            'exergy_eff': cm['exergy_eff'],
+            'heat_rejection_ratio': heat_rej_ratio,
+            'compactness': compactness,
+            'color': case.get('color', '#3498db'),
+        })
+    
+    radar_fig = plot_comparison_radar(
+        radar_cases,
+        title='综合性能雷达图 (五维度对比)'
+    )
+    
+    radar_plot_div = html.Div([
+        html.H4('🎯 综合性能雷达图',
+               style={'marginTop': 0, 'color': '#6c3483'}),
+        html.Div([
+            html.Span('维度说明:', style={'fontWeight': 'bold', 'fontSize': 12}),
+            html.Span(' 热效率 · 净功 · 㶲效率 · 热量利用率 · 紧凑性',
+                     style={'fontSize': 12, 'color': '#566573', 'marginLeft': 6}),
+        ], style={'marginBottom': 10}),
+        dcc.Graph(id='compare-radar-figure', figure=radar_fig,
+                 style={'height': '600px'})
+    ], style={'padding': 16, 'background': '#fdfefe',
+              'borderRadius': 8, 'border': '1px solid #d1f2eb',
+              'marginBottom': 20})
+    
+    # --- 5. 导出按钮 ---
+    export_div = html.Div([
+        html.H4('📤 导出对比结果', style={'marginTop': 0, 'color': '#6c3483'}),
+        html.Div([
+            html.Button('🖼️ 导出为PNG截图 (图表+表格)',
+                       id='btn-export-compare-png', n_clicks=0,
+                       style={'background': '#2980b9', 'color': 'white',
+                              'border': 'none', 'padding': '10px 20px',
+                              'borderRadius': 6, 'fontSize': 14,
+                              'cursor': 'pointer', 'marginRight': 12,
+                              'fontWeight': 'bold'}),
+            html.Button('📊 导出总览表为CSV',
+                       id='btn-export-compare-csv', n_clicks=0,
+                       style={'background': '#27ae60', 'color': 'white',
+                              'border': 'none', 'padding': '10px 20px',
+                              'borderRadius': 6, 'fontSize': 14,
+                              'cursor': 'pointer',
+                              'fontWeight': 'bold'}),
+        ]),
+        html.Div(f'生成时间: {compare_result.get("generated_at", "")}',
+                style={'marginTop': 10, 'fontSize': 11, 'color': '#95a5a6'}),
+    ], style={'padding': 16, 'background': '#fef9e7',
+              'borderRadius': 8, 'border': '1px solid #f9e79f',
+              'marginBottom': 20})
+    
+    return html.Div([
+        html.H3('🔬 工况对比结果 - 总览模式',
+               style={'marginTop': 0, 'color': '#6c3483',
+                      'borderBottom': '2px solid #8e44ad',
+                      'paddingBottom': 10}),
+        overview_table,
+        ts_plot_div,
+        radar_plot_div,
+        export_div,
+    ], style={'padding': 4})
+
+
+# ============================================================
+# 对比 - 敏感度分析
+# ============================================================
+
+def _render_compare_sensitivity(cases, compare_result):
+    """两工况敏感度对比分析"""
+    if len(cases) != 2:
+        return html.Div('需要恰好两组工况进行敏感度分析')
+    
+    case_a, case_b = cases
+    
+    # --- 重建循环以获取完整数据 ---
+    cycle_a, res_a = _rebuild_cycle_from_case(case_a)
+    cycle_b, res_b = _rebuild_cycle_from_case(case_b)
+    
+    params_a = case_a.get('params', {})
+    params_b = case_b.get('params', {})
+    
+    # --- 找出共同参数 ---
+    common_params = sorted(set(params_a.keys()) & set(params_b.keys()))
+    
+    # 找出变化的参数
+    changed_params = []
+    for p in common_params:
+        va, vb = params_a.get(p), params_b.get(p)
+        if va != vb:
+            # 获取参数label和单位
+            cfg_a = CYCLE_CONFIGS.get(case_a['cycle_type'], {})
+            param_info = next((x for x in cfg_a.get('params', []) if x['key'] == p), None)
+            label = param_info['label'] if param_info else p
+            unit = param_info['unit'] if param_info else ''
+            changed_params.append({
+                'key': p,
+                'label': label,
+                'unit': unit,
+                'value_a': va,
+                'value_b': vb,
+                'delta': vb - va if (isinstance(va, (int, float)) and isinstance(vb, (int, float))) else None,
+            })
+    
+    # --- 计算输出指标变化 ---
+    def _get_metric(res, key):
+        if key == 'eta':
+            return res.get('eta', res.get('eta_total', 0)) or 0
+        elif key == 'eta_carnot':
+            return res.get('eta_carnot', 0) or 0
+        elif key == 'w_net':
+            return res.get('w_net', res.get('W_dot_total_kW', 0)) or 0
+        elif key == 'q_in':
+            return res.get('q_in', 0) or 0
+        elif key == 'q_out':
+            return res.get('q_out', 0) or 0
+        elif key == 'exergy_eff':
+            return _compute_exergy_eff(res)
+        return 0
+    
+    output_metrics = [
+        ('热效率 η', 'eta', '%'),
+        ('Carnot效率', 'eta_carnot', '%'),
+        ('净输出功', 'w_net', 'kJ/kg'),
+        ('吸热量', 'q_in', 'kJ/kg'),
+        ('放热量', 'q_out', 'kJ/kg'),
+        ('㶲效率', 'exergy_eff', '%'),
+    ]
+    
+    sensitivity_rows = []
+    for metric_name, metric_key, unit in output_metrics:
+        va = _get_metric(res_a, metric_key)
+        vb = _get_metric(res_b, metric_key)
+        delta = vb - va
+        
+        if unit == '%':
+            va_str = f'{va*100:.3f}%'
+            vb_str = f'{vb*100:.3f}%'
+            delta_str = f'{delta*100:+.3f} pp'  # percentage points
+            pct_str = f'{(delta/va*100):+.2f}%' if va != 0 else 'N/A'
+        else:
+            va_str = f'{va:.3f}'
+            vb_str = f'{vb:.3f}'
+            delta_str = f'{delta:+.3f}'
+            pct_str = f'{(delta/va*100):+.2f}%' if va != 0 else 'N/A'
+        
+        # 颜色标记
+        if metric_key in ['eta', 'eta_carnot', 'w_net', 'exergy_eff']:
+            # 越高越好
+            if delta > 1e-9:
+                delta_color = '#27ae60'
+            elif delta < -1e-9:
+                delta_color = '#e74c3c'
+            else:
+                delta_color = '#7f8c8d'
+        elif metric_key == 'q_out':
+            # 越低越好
+            if delta < -1e-9:
+                delta_color = '#27ae60'
+            elif delta > 1e-9:
+                delta_color = '#e74c3c'
+            else:
+                delta_color = '#7f8c8d'
+        else:
+            delta_color = '#2c3e50'
+        
+        sensitivity_rows.append(html.Tr([
+            html.Td(html.Strong(metric_name),
+                   style={'padding': '8px 12px', 'backgroundColor': '#f2f3f4'}),
+            html.Td(unit, style={'padding': '8px 12px', 'color': '#7f8c8d'}),
+            html.Td(va_str, style={'padding': '8px 12px', 'textAlign': 'right',
+                                  'backgroundColor': '#fdf2e9'}),
+            html.Td(vb_str, style={'padding': '8px 12px', 'textAlign': 'right',
+                                  'backgroundColor': '#eaf2f8'}),
+            html.Td(delta_str, 
+                   style={'padding': '8px 12px', 'textAlign': 'right',
+                          'fontWeight': 'bold', 'color': delta_color}),
+            html.Td(pct_str,
+                   style={'padding': '8px 12px', 'textAlign': 'right',
+                          'fontWeight': 'bold', 'color': delta_color}),
+        ]))
+    
+    # --- 变化参数表 ---
+    changed_rows = []
+    for cp in changed_params:
+        delta = cp['delta']
+        if delta is not None:
+            delta_str = f'{delta:+.4g} {cp["unit"]}'.strip()
+            va_str = f'{cp["value_a"]:g} {cp["unit"]}'.strip()
+            vb_str = f'{cp["value_b"]:g} {cp["unit"]}'.strip()
+            pct_str = f'{(delta/cp["value_a"]*100):+.2f}%' if cp['value_a'] != 0 else 'N/A'
+        else:
+            delta_str = f'{cp["value_a"]} → {cp["value_b"]}'
+            va_str = str(cp['value_a'])
+            vb_str = str(cp['value_b'])
+            pct_str = '-'
+        
+        changed_rows.append(html.Tr([
+            html.Td(html.Strong(cp['label']),
+                   style={'padding': '8px 12px', 'backgroundColor': '#f2f3f4'}),
+            html.Td(cp['unit'], style={'padding': '8px 12px', 'color': '#7f8c8d'}),
+            html.Td(va_str, style={'padding': '8px 12px', 'textAlign': 'right',
+                                  'backgroundColor': '#fdf2e9'}),
+            html.Td(vb_str, style={'padding': '8px 12px', 'textAlign': 'right',
+                                  'backgroundColor': '#eaf2f8'}),
+            html.Td(delta_str, style={'padding': '8px 12px', 'textAlign': 'right',
+                                     'fontWeight': 'bold', 'color': '#6c3483'}),
+            html.Td(pct_str, style={'padding': '8px 12px', 'textAlign': 'right',
+                                   'fontWeight': 'bold', 'color': '#6c3483'}),
+        ]))
+    
+    if not changed_rows:
+        changed_rows.append(html.Tr([
+            html.Td(html.Span('两组工况参数完全相同,无可对比差异',
+                             style={'color': '#e67e22'}),
+                   colSpan=6, style={'padding': '20px', 'textAlign': 'center'})
+        ]))
+    
+    # --- 构造卡片显示工况信息 ---
+    def _make_case_card(case, color, label_text):
+        return html.Div([
+            html.Div(label_text, 
+                    style={'fontSize': 11, 'color': 'white',
+                           'backgroundColor': color, 'padding': '4px 10px',
+                           'borderRadius': '4px 4px 0 0',
+                           'fontWeight': 'bold'}),
+            html.Div([
+                html.Strong(case['name'], style={'fontSize': 15}),
+                html.Div(f"{case['cycle_name']} · {case.get('created_at','')[:10]}",
+                        style={'fontSize': 11, 'color': '#7f8c8d',
+                               'marginTop': 2}),
+            ], style={'padding': 12, 'background': 'white',
+                     'border': f'2px solid {color}',
+                     'borderTop': 'none',
+                     'borderRadius': '0 0 8px 8px'}),
+        ], style={'width': '48%'})
+    
+    cards_row = html.Div([
+        _make_case_card(case_a, case_a.get('color', '#e74c3c'), '工况 A (基准)'),
+        html.Div('→', style={'fontSize': 30, 'alignSelf': 'center',
+                             'color': '#8e44ad', 'fontWeight': 'bold'}),
+        _make_case_card(case_b, case_b.get('color', '#3498db'), '工况 B (对比)'),
+    ], style={'display': 'flex', 'justifyContent': 'space-between',
+              'alignItems': 'stretch', 'marginBottom': 20})
+    
+    # --- 最终组合 ---
+    return html.Div([
+        html.H3('🔬 工况对比结果 - 敏感度分析模式',
+               style={'marginTop': 0, 'color': '#6c3483',
+                      'borderBottom': '2px solid #8e44ad',
+                      'paddingBottom': 10}),
+        html.Div([
+            html.Span('💡 分析两工况间参数变化对各输出指标的影响',
+                     style={'background': '#ebf5fb', 'padding': '8px 12px',
+                            'borderRadius': 6, 'fontSize': 12, 'color': '#2874a6'}),
+        ], style={'marginBottom': 16}),
+        
+        cards_row,
+        
+        # 变化参数表
+        html.Div([
+            html.H4('🔧 变化的输入参数',
+                   style={'marginTop': 0, 'color': '#6c3483'}),
+            html.Table([
+                html.Thead(html.Tr([
+                    html.Th('参数名', style={'background': '#d6baf3',
+                                            'color': '#4a235a',
+                                            'padding': '10px 12px'}),
+                    html.Th('单位', style={'background': '#d6baf3',
+                                          'color': '#4a235a',
+                                          'padding': '10px 12px'}),
+                    html.Th(f'A: {case_a["name"]}',
+                           style={'background': case_a.get('color', '#e74c3c'),
+                                  'color': 'white', 'padding': '10px 12px'}),
+                    html.Th(f'B: {case_b["name"]}',
+                           style={'background': case_b.get('color', '#3498db'),
+                                  'color': 'white', 'padding': '10px 12px'}),
+                    html.Th('变化量',
+                           style={'background': '#af7ac5', 'color': 'white',
+                                  'padding': '10px 12px'}),
+                    html.Th('变化率',
+                           style={'background': '#af7ac5', 'color': 'white',
+                                  'padding': '10px 12px'}),
+                ])),
+                html.Tbody(changed_rows),
+            ], style={'width': '100%', 'borderCollapse': 'collapse',
+                      'background': 'white', 'marginBottom': 24}),
+        ], style={'padding': 16, 'background': '#f5eef8',
+                  'borderRadius': 8, 'border': '1px solid #d7bde2',
+                  'marginBottom': 20}),
+        
+        # 输出指标变化表
+        html.Div([
+            html.H4('📊 输出指标变化分析',
+                   style={'marginTop': 0, 'color': '#6c3483'}),
+            html.Div([
+                html.Span('✅ 绿色 = 变好', style={'background': '#d4efdf',
+                             'padding': '4px 10px', 'borderRadius': 4,
+                             'fontSize': 12, 'marginRight': 10}),
+                html.Span('❌ 红色 = 变差', style={'background': '#fadbd8',
+                             'padding': '4px 10px', 'borderRadius': 4,
+                             'fontSize': 12}),
+                html.Span(' (放热量越低越好)',
+                         style={'fontSize': 11, 'color': '#7f8c8d',
+                                'marginLeft': 10}),
+            ], style={'marginBottom': 10}),
+            html.Table([
+                html.Thead(html.Tr([
+                    html.Th('输出指标', style={'background': '#8e44ad',
+                                              'color': 'white',
+                                              'padding': '10px 12px'}),
+                    html.Th('单位', style={'background': '#8e44ad',
+                                          'color': 'white',
+                                          'padding': '10px 12px'}),
+                    html.Th(f'A: {case_a["name"]}',
+                           style={'background': case_a.get('color', '#e74c3c'),
+                                  'color': 'white', 'padding': '10px 12px'}),
+                    html.Th(f'B: {case_b["name"]}',
+                           style={'background': case_b.get('color', '#3498db'),
+                                  'color': 'white', 'padding': '10px 12px'}),
+                    html.Th('变化量',
+                           style={'background': '#6c3483', 'color': 'white',
+                                  'padding': '10px 12px'}),
+                    html.Th('变化率',
+                           style={'background': '#6c3483', 'color': 'white',
+                                  'padding': '10px 12px'}),
+                ])),
+                html.Tbody(sensitivity_rows),
+            ], style={'width': '100%', 'borderCollapse': 'collapse',
+                      'background': 'white'}),
+        ], style={'padding': 16, 'background': '#eaf2f8',
+                  'borderRadius': 8, 'border': '1px solid #aed6f1',
+                  'marginBottom': 20}),
+        
+        # 导出按钮
+        html.Div([
+            html.Button('📊 导出敏感度表为CSV',
+                       id='btn-export-sensitivity-csv', n_clicks=0,
+                       style={'background': '#27ae60', 'color': 'white',
+                              'border': 'none', 'padding': '10px 20px',
+                              'borderRadius': 6, 'fontSize': 14,
+                              'cursor': 'pointer', 'fontWeight': 'bold'}),
+            html.Div(f'生成时间: {compare_result.get("generated_at", "")}',
+                    style={'marginTop': 10, 'fontSize': 11, 'color': '#95a5a6'}),
+        ], style={'padding': 16, 'background': '#fef9e7',
+                  'borderRadius': 8, 'border': '1px solid #f9e79f'}),
+        
+    ], style={'padding': 4})
+
+
+# ============================================================
+# 工况对比 - 导出功能
+# ============================================================
+
+@app.callback(
+    Output('download-compare-csv', 'data'),
+    [Input('btn-export-compare-csv', 'n_clicks'),
+     Input('btn-export-sensitivity-csv', 'n_clicks')],
+    [State('compare-result-store', 'data')],
+    prevent_initial_call=True
+)
+def export_compare_csv(n_compare_csv, n_sens_csv, compare_result):
+    ctx = callback_context
+    if not ctx.triggered or not compare_result:
+        raise PreventUpdate
+    
+    button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    cases = compare_result.get('cases', [])
+    mode = compare_result.get('mode', 'overview')
+    
+    # 提取工况指标
+    def _extract_metrics(case):
+        res = case.get('results', {})
+        cycle, _ = _rebuild_cycle_from_case(case)
+        return {
+            'case_name': case['name'],
+            'cycle_type': case.get('cycle_name', ''),
+            'eta': res.get('eta', res.get('eta_total', 0)) or 0,
+            'eta_carnot': res.get('eta_carnot', 0) or 0,
+            'w_net': res.get('w_net', res.get('W_dot_total_kW', 0)) or 0,
+            'q_in': res.get('q_in', 0) or 0,
+            'q_out': res.get('q_out', 0) or 0,
+            'exergy_eff': _compute_exergy_eff(res),
+            'heat_util': 1 - (res.get('q_out',0)/res.get('q_in',1)) if res.get('q_in',0) > 0 else 0,
+            'compactness': _compute_compactness(cycle) if cycle else 0,
+        }
+    
+    if button_id == 'btn-export-compare-csv' and mode == 'overview':
+        rows = []
+        header = ['指标', '单位'] + [c['name'] for c in cases]
+        metrics_def = [
+            ('热效率 η', 'eta', '%'),
+            ('Carnot效率', 'eta_carnot', '%'),
+            ('净输出功', 'w_net', 'kJ/kg'),
+            ('吸热量', 'q_in', 'kJ/kg'),
+            ('放热量', 'q_out', 'kJ/kg'),
+            ('㶲效率', 'exergy_eff', '%'),
+            ('热量利用率(1-q_out/q_in)', 'heat_util', '%'),
+            ('紧凑性', 'compactness', ''),
+        ]
+        for mname, mkey, unit in metrics_def:
+            row = [mname, unit]
+            for case in cases:
+                m = _extract_metrics(case)
+                v = m.get(mkey, 0)
+                if unit == '%':
+                    row.append(f'{v*100:.4f}%')
+                else:
+                    row.append(f'{v:.4f}')
+            rows.append(row)
+        
+        df = pd.DataFrame(rows, columns=header)
+        csv_str = df.to_csv(index=False, encoding='utf-8-sig')
+        
+        return dict(content=csv_str, filename=f'工况对比总览_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv',
+                   type='text/csv')
+    
+    elif button_id == 'btn-export-sensitivity-csv' and mode == 'sensitivity' and len(cases) == 2:
+        case_a, case_b = cases
+        params_a = case_a.get('params', {})
+        params_b = case_b.get('params', {})
+        common_params = sorted(set(params_a.keys()) & set(params_b.keys()))
+        
+        # 参数变化表
+        param_rows = []
+        param_rows.append(['=== 输入参数变化 ===', '', '', '', '', ''])
+        param_rows.append(['参数名', '单位', f'A: {case_a["name"]}', f'B: {case_b["name"]}', '变化量', '变化率(%)'])
+        for p in common_params:
+            va, vb = params_a.get(p), params_b.get(p)
+            cfg_a = CYCLE_CONFIGS.get(case_a['cycle_type'], {})
+            pinfo = next((x for x in cfg_a.get('params', []) if x['key'] == p), None)
+            label = pinfo['label'] if pinfo else p
+            unit = pinfo['unit'] if pinfo else ''
+            if isinstance(va, (int, float)) and isinstance(vb, (int, float)):
+                delta = vb - va
+                pct = (delta / va * 100) if va != 0 else None
+                param_rows.append([label, unit, f'{va:g}', f'{vb:g}',
+                                   f'{delta:+.4g}', f'{pct:+.2f}' if pct is not None else 'N/A'])
+            else:
+                param_rows.append([label, unit, str(va), str(vb), '-', '-'])
+        
+        # 指标变化表
+        param_rows.append([])
+        param_rows.append(['=== 输出指标变化 ===', '', '', '', '', ''])
+        param_rows.append(['指标', '单位', f'A: {case_a["name"]}', f'B: {case_b["name"]}', '变化量', '变化率(%)'])
+        
+        ma, mb = _extract_metrics(case_a), _extract_metrics(case_b)
+        out_defs = [
+            ('热效率 η', 'eta', '%'),
+            ('Carnot效率', 'eta_carnot', '%'),
+            ('净输出功', 'w_net', 'kJ/kg'),
+            ('吸热量', 'q_in', 'kJ/kg'),
+            ('放热量', 'q_out', 'kJ/kg'),
+            ('㶲效率', 'exergy_eff', '%'),
+        ]
+        for mname, mkey, unit in out_defs:
+            va, vb = ma.get(mkey,0), mb.get(mkey,0)
+            delta = vb - va
+            if unit == '%':
+                pct = (delta / va * 100) if va != 0 else None
+                param_rows.append([mname, unit, f'{va*100:.4f}%', f'{vb*100:.4f}%',
+                                   f'{delta*100:+.4f} pp', f'{pct:+.2f}' if pct is not None else 'N/A'])
+            else:
+                pct = (delta / va * 100) if va != 0 else None
+                param_rows.append([mname, unit, f'{va:.4f}', f'{vb:.4f}',
+                                   f'{delta:+.4f}', f'{pct:+.2f}' if pct is not None else 'N/A'])
+        
+        df = pd.DataFrame(param_rows)
+        csv_str = df.to_csv(index=False, header=False, encoding='utf-8-sig')
+        
+        return dict(content=csv_str, filename=f'敏感度分析_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv',
+                   type='text/csv')
+    
+    raise PreventUpdate
+
+
+@app.callback(
+    Output('download-compare-png', 'data'),
+    [Input('btn-export-compare-png', 'n_clicks')],
+    [State('compare-result-store', 'data')],
+    prevent_initial_call=True
+)
+def export_compare_png(n_clicks, compare_result):
+    if n_clicks == 0 or not compare_result:
+        raise PreventUpdate
+    
+    mode = compare_result.get('mode', 'overview')
+    cases = compare_result.get('cases', [])
+    
+    if mode != 'overview':
+        # 敏感度模式也可以导出两张图
+        pass
+    
+    # 重建工况
+    case_metrics = []
+    for case in cases:
+        cycle, res = _rebuild_cycle_from_case(case)
+        q_in = res.get('q_in', 0) or 0
+        q_out = res.get('q_out', 0) or 0
+        case_metrics.append({
+            'case': case,
+            'cycle': cycle,
+            'eta': res.get('eta', res.get('eta_total', 0)) or 0,
+            'w_net': res.get('w_net', res.get('W_dot_total_kW', 0)) or 0,
+            'exergy_eff': _compute_exergy_eff(res),
+            'heat_rejection_ratio': q_out / q_in if q_in > 0 else 0,
+            'compactness': _compute_compactness(cycle) if cycle else 0.01,
+        })
+    
+    # 生成T-s叠加图
+    cycles_data = []
+    for cm in case_metrics:
+        case = cm['case']
+        cycle = cm['cycle']
+        if cycle:
+            cycles_data.append({
+                'name': case['name'],
+                'cycle': cycle,
+                'fluid_type': case.get('fluid_type', 'water'),
+                'color': case.get('color', '#3498db'),
+            })
+    
+    fig_ts = plot_superimposed_Ts(cycles_data, title='叠加T-s图 - 工况对比')
+    
+    # 生成雷达图
+    radar_cases = []
+    for cm in case_metrics:
+        case = cm['case']
+        radar_cases.append({
+            'name': case['name'],
+            'eta': cm['eta'],
+            'w_net': cm['w_net'],
+            'exergy_eff': cm['exergy_eff'],
+            'heat_rejection_ratio': cm['heat_rejection_ratio'],
+            'compactness': cm['compactness'],
+            'color': case.get('color', '#3498db'),
+        })
+    fig_radar = plot_comparison_radar(radar_cases, title='综合性能雷达图')
+    
+    # 使用subplots将两个图合在一起导出
+    from plotly.subplots import make_subplots
+    
+    # 组合成一个大图 (上下布局)
+    combined_fig = make_subplots(
+        rows=2, cols=1,
+        subplot_titles=('叠加T-s图 (多工况循环路径对比)', '综合性能雷达图'),
+        vertical_spacing=0.08,
+        specs=[[{'type': 'xy'}], [{'type': 'polar'}]]
+    )
+    
+    # 添加T-s图 traces
+    for trace in fig_ts.data:
+        combined_fig.add_trace(trace, row=1, col=1)
+    combined_fig.update_xaxes(title_text='比熵 s [kJ/(kg·K)]', row=1, col=1)
+    combined_fig.update_yaxes(title_text='温度 T [°C]', row=1, col=1)
+    
+    # 添加雷达图 traces
+    for trace in fig_radar.data:
+        combined_fig.add_trace(trace, row=2, col=1)
+    combined_fig.update_layout(
+        polar=fig_radar.layout.polar,
+        polar_domain=dict(y=[0, 0.45])
+    )
+    
+    combined_fig.update_layout(
+        height=1100,
+        width=1000,
+        title=dict(text=f'工况对比分析报告 - {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+                  font=dict(size=18, color='#6c3483'),
+                  x=0.5),
+        showlegend=True,
+        legend=dict(x=1.02, y=0.5, xanchor='left'),
+        paper_bgcolor='white',
+        plot_bgcolor='white',
+    )
+    
+    # 导出为PNG
+    tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+    tmp.close()
+    ok, msg = export_figure_png(combined_fig, tmp.name, scale=2)
+    if ok:
+        with open(tmp.name, 'rb') as f:
+            content = f.read()
+        os.unlink(tmp.name)
+        return dict(content=base64.b64encode(content).decode(),
+                   filename=f'工况对比_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png',
+                   type='image/png', base64=True)
+    else:
+        return dict(content=f'PNG导出失败: {msg}', filename='export_error.txt')
 
 
 # ============================================================
