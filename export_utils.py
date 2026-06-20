@@ -119,8 +119,40 @@ def generate_pdf_report(cycle, figures, filepath, title=None):
                                          Table, TableStyle, Image, PageBreak)
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.ttfonts import TTFont
+        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
     except ImportError:
         return False, "reportlab 未安装"
+    
+    # 注册中文字体 - 尝试多种常见字体
+    font_registered = False
+    font_name = 'Helvetica'
+    # 尝试注册常用的CID中文字体
+    try:
+        pdfmetrics.registerFont(UnicodeCIDFont('STSong-Light'))
+        font_name = 'STSong-Light'
+        font_registered = True
+    except:
+        pass
+    # 尝试macOS系统字体
+    if not font_registered:
+        font_paths = [
+            '/System/Library/Fonts/PingFang.ttc',
+            '/System/Library/Fonts/STHeiti Light.ttc',
+            '/System/Library/Fonts/Hiragino Sans GB.ttc',
+            '/Library/Fonts/Arial Unicode.ttf',
+            'C:/Windows/Fonts/msyh.ttc',
+            'C:/Windows/Fonts/simhei.ttf',
+            'C:/Windows/Fonts/simsun.ttc',
+        ]
+        for fp in font_paths:
+            if os.path.exists(fp):
+                try:
+                    pdfmetrics.registerFont(TTFont('ChineseFont', fp))
+                    font_name = 'ChineseFont'
+                    font_registered = True
+                    break
+                except:
+                    continue
     
     doc = SimpleDocTemplate(filepath, pagesize=A4,
                             topMargin=2*cm, bottomMargin=2*cm,
@@ -129,23 +161,32 @@ def generate_pdf_report(cycle, figures, filepath, title=None):
     story = []
     styles = getSampleStyleSheet()
     
+    # 创建支持中文的样式
+    def _cn_style(base_style, **kw):
+        kw['fontName'] = font_name
+        return ParagraphStyle('CN_' + base_style.name, parent=base_style, **kw)
+    
+    cn_normal = _cn_style(styles['Normal'], fontSize=10, leading=14)
+    cn_h1 = _cn_style(styles['Heading1'], fontSize=20, leading=26, textColor=colors.HexColor('#2c3e50'))
+    cn_h2 = _cn_style(styles['Heading2'], fontSize=14, leading=18, spaceBefore=10)
+    cn_h3 = _cn_style(styles['Heading3'], fontSize=12, leading=16, spaceBefore=8)
+    
     # 标题
     title_text = title or f'{cycle.name} - 热力学循环分析报告'
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Title'],
-        fontSize=20,
-        spaceAfter=30,
-        textColor=colors.HexColor('#2c3e50')
-    )
-    story.append(Paragraph(title_text, title_style))
-    story.append(Paragraph(f'生成时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}', 
-                           styles['Normal']))
+    story.append(Paragraph(title_text, cn_h1))
+    story.append(Paragraph(f'生成时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}', cn_normal))
     story.append(Spacer(1, 0.5*cm))
     
     # 效率汇总
-    story.append(Paragraph('<b>一、效率汇总</b>', styles['Heading2']))
+    story.append(Paragraph('一、效率汇总', cn_h2))
     res = cycle.results
+    
+    def _s(v):
+        """安全转字符串"""
+        try:
+            return str(v)
+        except:
+            return '-'
     
     eff_data = [
         ['指标', '数值'],
@@ -170,7 +211,7 @@ def generate_pdf_report(cycle, figures, filepath, title=None):
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#3498db')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTNAME', (0, 0), (-1, 0), font_name),
         ('FONTSIZE', (0, 0), (-1, 0), 11),
         ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
         ('BACKGROUND', (0, 1), (-1, -1), colors.whitesmoke),
@@ -182,27 +223,27 @@ def generate_pdf_report(cycle, figures, filepath, title=None):
     # 警告信息
     warnings = res.get('warnings', [])
     if warnings:
-        story.append(Paragraph('<b>警告</b>', styles['Heading2']))
+        story.append(Paragraph('警告', cn_h2))
         for w in warnings:
-            story.append(Paragraph(f'⚠ {w}', styles['Normal']))
+            story.append(Paragraph('⚠ ' + _s(w), cn_normal))
         story.append(Spacer(1, 0.5*cm))
     
     # 状态点参数表
-    story.append(Paragraph('<b>二、状态点参数</b>', styles['Heading2']))
+    story.append(Paragraph('二、状态点参数', cn_h2))
     
     state_data = [['状态点', 'T(°C)', 'P(MPa)', 'h(kJ/kg)', 
                    's(kJ/kg·K)', 'v(m³/kg)', '干度x', '区域']]
     
     for label, sp in cycle.states.items():
         row = [
-            label,
+            _s(label),
             f'{sp.T - 273.15:.2f}' if sp.T else '-',
             f'{sp.P:.4f}' if sp.P else '-',
             f'{sp.h:.2f}' if sp.h else '-',
             f'{sp.s:.4f}' if sp.s else '-',
             f'{sp.v:.6f}' if sp.v else '-',
             f'{sp.x:.4f}' if sp.x is not None else '-',
-            str(sp.region),
+            _s(sp.region),
         ]
         state_data.append(row)
     
@@ -211,6 +252,7 @@ def generate_pdf_report(cycle, figures, filepath, title=None):
     t2.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#27ae60')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, -1), font_name),
         ('FONTSIZE', (0, 0), (-1, -1), 8),
         ('GRID', (0, 0), (-1, -1), 0.4, colors.gray),
         ('BACKGROUND', (0, 1), (-1, -1), colors.whitesmoke),
@@ -221,12 +263,12 @@ def generate_pdf_report(cycle, figures, filepath, title=None):
     # 㶲损失分析
     ex_d = res.get('exergy_destruction', {})
     if ex_d:
-        story.append(Paragraph('<b>三、㶲损失分析</b>', styles['Heading2']))
+        story.append(Paragraph('三、㶲损失分析', cn_h2))
         ex_data = [['组件', '㶲损失(kJ/kg)', '占比(%)']]
         total = sum(ex_d.values())
         for comp, val in sorted(ex_d.items(), key=lambda x: -x[1]):
             ex_data.append([
-                comp,
+                _s(comp),
                 f'{val:.3f}',
                 f'{val/total*100:.2f}%' if total > 0 else '0%'
             ])
@@ -235,10 +277,11 @@ def generate_pdf_report(cycle, figures, filepath, title=None):
         t3.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#e67e22')),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, -1), font_name),
             ('GRID', (0, 0), (-1, -1), 0.4, colors.gray),
             ('BACKGROUND', (0, 1), (-1, -2), colors.whitesmoke),
             ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#fdebd0')),
-            ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+            ('FONTNAME', (0, -1), (-1, -1), font_name),
         ]))
         story.append(t3)
         story.append(Spacer(1, 0.5*cm))
@@ -246,10 +289,10 @@ def generate_pdf_report(cycle, figures, filepath, title=None):
     # 图表
     if figures:
         story.append(PageBreak())
-        story.append(Paragraph('<b>四、热力学图</b>', styles['Heading2']))
+        story.append(Paragraph('四、热力学图', cn_h2))
         
         for fig_name, fig in figures.items():
-            story.append(Paragraph(fig_name, styles['Heading3']))
+            story.append(Paragraph(_s(fig_name), cn_h3))
             try:
                 # 转PNG嵌入
                 png_b64 = figure_to_base64_png(fig)
@@ -258,9 +301,9 @@ def generate_pdf_report(cycle, figures, filepath, title=None):
                     img = Image(io.BytesIO(img_data), width=16*cm, height=10*cm)
                     story.append(img)
                 else:
-                    story.append(Paragraph('[图表渲染失败]', styles['Normal']))
+                    story.append(Paragraph('[图表渲染失败]', cn_normal))
             except Exception as e:
-                story.append(Paragraph(f'[图表错误: {e}]', styles['Normal']))
+                story.append(Paragraph(f'[图表错误: {_s(e)}]', cn_normal))
             story.append(Spacer(1, 0.5*cm))
     
     try:

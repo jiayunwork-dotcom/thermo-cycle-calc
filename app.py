@@ -390,7 +390,7 @@ def _collect_params(cycle_type, ctx=None):
      Output('cycle-data-store', 'data')],
     [Input('cycle-type', 'value'),
      Input('btn-compute', 'n_clicks')] +
-    [State(f"param-{k}-{p['key']}", 'value') 
+    [Input(f"param-{k}-{p['key']}", 'value') 
      for k in CYCLE_CONFIGS 
      for p in CYCLE_CONFIGS[k]['params']],
     prevent_initial_call=False
@@ -650,41 +650,131 @@ def _render_parametric_tab(cycle_type):
                       'value': p['key']} for p in cfg['params']]
     
     return html.Div([
-        html.H4('📊 参数化分析 - 单参数扫描', style={'marginTop': 0}),
-        html.Div([
-            html.Div([
-                html.Label('选择扫描参数:'),
-                dcc.Dropdown(id='sweep-param', options=param_options,
-                            value=cfg['params'][0]['key'], clearable=False),
-            ], style={'width': '30%', 'display': 'inline-block', 'marginRight': 20}),
-            html.Div([
-                html.Label('最小值:'),
-                dcc.Input(id='sweep-min', type='number', value=cfg['params'][0]['min'],
-                         style={'width': '100px'}),
-            ], style={'display': 'inline-block', 'marginRight': 20}),
-            html.Div([
-                html.Label('最大值:'),
-                dcc.Input(id='sweep-max', type='number', value=cfg['params'][0]['max'],
-                         style={'width': '100px'}),
-            ], style={'display': 'inline-block', 'marginRight': 20}),
-            html.Div([
-                html.Label('点数:'),
-                dcc.Input(id='sweep-n', type='number', value=10, min=3, max=50,
-                         style={'width': '80px'}),
-            ], style={'display': 'inline-block', 'marginRight': 20}),
-            html.Button('开始扫描', id='btn-sweep', n_clicks=0,
-                       style={'background': '#2980b9', 'color': 'white',
-                              'border': 'none', 'padding': '8px 16px',
-                              'borderRadius': 4, 'cursor': 'pointer'}),
-        ], style={'marginBottom': 20, 'padding': 16, 'background': '#f8f9fa',
-                 'borderRadius': 8}),
+        html.H4('📊 参数化分析', style={'marginTop': 0}),
         
-        dcc.Loading(
-            id='loading-sweep',
-            type='default',
-            children=html.Div(id='sweep-results')
-        ),
+        dcc.Tabs(id='sweep-mode-tabs', value='sweep-single', children=[
+            dcc.Tab(label='单参数扫描', value='sweep-single'),
+            dcc.Tab(label='双参数扫描(等值线图)', value='sweep-double'),
+        ]),
+        html.Div(id='sweep-mode-content', style={'marginTop': 16}),
     ])
+
+
+@app.callback(Output('sweep-mode-content', 'children'),
+              [Input('sweep-mode-tabs', 'value'),
+               Input('cycle-type', 'value')])
+def _render_sweep_mode_content(mode, cycle_type):
+    cfg = CYCLE_CONFIGS[cycle_type]
+    param_options = [{'label': f"{p['label']} ({p['unit']})" if p['unit'] else p['label'],
+                      'value': p['key']} for p in cfg['params']]
+    
+    if mode == 'sweep-single':
+        return html.Div([
+            html.H5('📈 单参数扫描', style={'marginTop': 0}),
+            html.Div([
+                html.Div([
+                    html.Label('选择扫描参数:'),
+                    dcc.Dropdown(id='sweep-param', options=param_options,
+                                value=cfg['params'][0]['key'], clearable=False),
+                ], style={'width': '30%', 'display': 'inline-block', 'marginRight': 20}),
+                html.Div([
+                    html.Label('最小值:'),
+                    dcc.Input(id='sweep-min', type='number', value=cfg['params'][0]['min'],
+                             style={'width': '100px'}),
+                ], style={'display': 'inline-block', 'marginRight': 20}),
+                html.Div([
+                    html.Label('最大值:'),
+                    dcc.Input(id='sweep-max', type='number', value=cfg['params'][0]['max'],
+                             style={'width': '100px'}),
+                ], style={'display': 'inline-block', 'marginRight': 20}),
+                html.Div([
+                    html.Label('点数:'),
+                    dcc.Input(id='sweep-n', type='number', value=10, min=3, max=50,
+                             style={'width': '80px'}),
+                ], style={'display': 'inline-block', 'marginRight': 20}),
+                html.Button('开始扫描', id='btn-sweep', n_clicks=0,
+                           style={'background': '#2980b9', 'color': 'white',
+                                  'border': 'none', 'padding': '8px 16px',
+                                  'borderRadius': 4, 'cursor': 'pointer'}),
+            ], style={'marginBottom': 20, 'padding': 16, 'background': '#f8f9fa',
+                     'borderRadius': 8}),
+            
+            dcc.Loading(
+                id='loading-sweep',
+                type='default',
+                children=html.Div(id='sweep-results')
+            ),
+        ])
+    else:  # 双参数扫描
+        return html.Div([
+            html.H5('🗺 双参数扫描 (等值线图)', style={'marginTop': 0}),
+            html.Div([
+                # 参数X
+                html.Div([
+                    html.Label('参数 X (横轴):'),
+                    dcc.Dropdown(id='sweep2-param-x', options=param_options,
+                                value=cfg['params'][0]['key'], clearable=False),
+                    html.Div([
+                        html.Label('最小值:'),
+                        dcc.Input(id='sweep2-x-min', type='number', value=cfg['params'][0]['min'],
+                                 style={'width': '80px'}),
+                        html.Label('  最大值:'),
+                        dcc.Input(id='sweep2-x-max', type='number', value=cfg['params'][0]['max'],
+                                 style={'width': '80px'}),
+                        html.Label('  点数:'),
+                        dcc.Input(id='sweep2-x-n', type='number', value=8, min=3, max=20,
+                                 style={'width': '60px'}),
+                    ], style={'marginTop': 6}),
+                ], style={'width': '47%', 'display': 'inline-block', 'marginRight': '3%',
+                         'padding': 12, 'background': '#eaf2f8', 'borderRadius': 6}),
+                # 参数Y
+                html.Div([
+                    html.Label('参数 Y (纵轴):'),
+                    dcc.Dropdown(id='sweep2-param-y', options=param_options,
+                                value=cfg['params'][1]['key'] if len(cfg['params'])>1 else cfg['params'][0]['key'], 
+                                clearable=False),
+                    html.Div([
+                        html.Label('最小值:'),
+                        dcc.Input(id='sweep2-y-min', type='number', 
+                                 value=cfg['params'][1]['min'] if len(cfg['params'])>1 else cfg['params'][0]['min'],
+                                 style={'width': '80px'}),
+                        html.Label('  最大值:'),
+                        dcc.Input(id='sweep2-y-max', type='number', 
+                                 value=cfg['params'][1]['max'] if len(cfg['params'])>1 else cfg['params'][0]['max'],
+                                 style={'width': '80px'}),
+                        html.Label('  点数:'),
+                        dcc.Input(id='sweep2-y-n', type='number', value=8, min=3, max=20,
+                                 style={'width': '60px'}),
+                    ], style={'marginTop': 6}),
+                ], style={'width': '47%', 'display': 'inline-block',
+                         'padding': 12, 'background': '#fdf2e9', 'borderRadius': 6}),
+            ], style={'marginBottom': 12}),
+            
+            html.Div([
+                html.Label('输出指标: '),
+                dcc.RadioItems(
+                    id='sweep2-z',
+                    options=[
+                        {'label': ' 热效率 η', 'value': 'eta'},
+                        {'label': ' 净输出功 w_net', 'value': 'wnet'},
+                    ],
+                    value='eta',
+                    labelStyle={'display': 'inline-block', 'marginRight': 20}
+                ),
+                html.Button('开始扫描', id='btn-sweep2', n_clicks=0,
+                           style={'background': '#8e44ad', 'color': 'white',
+                                  'border': 'none', 'padding': '8px 16px',
+                                  'borderRadius': 4, 'cursor': 'pointer',
+                                  'marginLeft': 20}),
+            ], style={'marginBottom': 20, 'padding': 16, 'background': '#f8f9fa',
+                     'borderRadius': 8}),
+            
+            dcc.Loading(
+                id='loading-sweep2',
+                type='default',
+                children=html.Div(id='sweep2-results')
+            ),
+        ])
 
 
 # 参数化扫描执行
@@ -740,6 +830,93 @@ def run_parametric_sweep(n_clicks, cycle_type, param, pmin, pmax, n):
     ])
 
 
+# 双参数扫描执行
+@app.callback(Output('sweep2-results', 'children'),
+              [Input('btn-sweep2', 'n_clicks'),
+               Input('cycle-type', 'value')],
+              [State('sweep2-param-x', 'value'),
+               State('sweep2-x-min', 'value'),
+               State('sweep2-x-max', 'value'),
+               State('sweep2-x-n', 'value'),
+               State('sweep2-param-y', 'value'),
+               State('sweep2-y-min', 'value'),
+               State('sweep2-y-max', 'value'),
+               State('sweep2-y-n', 'value'),
+               State('sweep2-z', 'value')])
+def run_double_sweep(n_clicks, cycle_type, px, px_min, px_max, px_n,
+                     py, py_min, py_max, py_n, z_metric):
+    if n_clicks == 0 or not px or not py:
+        raise PreventUpdate
+    
+    cfg = CYCLE_CONFIGS[cycle_type]
+    cls = cfg['class']
+    
+    # 默认参数
+    kwargs = {}
+    for p in cfg['params']:
+        if p['key'].startswith('T'):
+            kwargs[p['key']] = p['default'] + 273.15
+        else:
+            kwargs[p['key']] = p['default']
+    
+    if 'extra_kwargs' in cfg:
+        kwargs.update(cfg['extra_kwargs'])
+    
+    # 温度转换
+    def _conv(param, val):
+        return val + 273.15 if param.startswith('T') else val
+    
+    px_min_c = _conv(px, px_min)
+    px_max_c = _conv(px, px_max)
+    py_min_c = _conv(py, py_min)
+    py_max_c = _conv(py, py_max)
+    
+    try:
+        p1_vals, p2_vals, eta_mtx, wnet_mtx = multi_param_sweep(
+            cls, kwargs, px, px_min_c, px_max_c, px_n,
+            py, py_min_c, py_max_c, py_n
+        )
+    except Exception as e:
+        return html.Div(f'扫描失败: {e}', style={'color': '#e74c3c'})
+    
+    # 温度参数转回°C
+    if px.startswith('T'):
+        p1_vals = p1_vals - 273.15
+    if py.startswith('T'):
+        p2_vals = p2_vals - 273.15
+    
+    px_cfg = next((p for p in cfg['params'] if p['key'] == px), None)
+    py_cfg = next((p for p in cfg['params'] if p['key'] == py), None)
+    px_label = px_cfg['label'] if px_cfg else px
+    py_label = py_cfg['label'] if py_cfg else py
+    px_unit = px_cfg['unit'] if px_cfg else ''
+    py_unit = py_cfg['unit'] if py_cfg else ''
+    
+    if z_metric == 'eta':
+        z_mtx = eta_mtx * 100
+        z_name = '热效率'
+        z_unit = '%'
+    else:
+        z_mtx = wnet_mtx
+        z_name = '净输出功'
+        z_unit = 'kJ/kg'
+    
+    fig = plot_2d_contour(p1_vals, p2_vals, z_mtx,
+                          x_name=px_label, y_name=py_label, z_name=z_name,
+                          x_unit=px_unit, y_unit=py_unit, z_unit=z_unit,
+                          title=f'{cfg["name"]} - 双参数扫描 ({z_name})')
+    
+    return html.Div([
+        html.Div([
+            html.Strong(f'网格: {px_n} × {py_n} = {px_n * py_n} 个计算点'),
+            html.Span(f'  |  X: {px_label} [{px_min}, {px_max}] {px_unit}'),
+            html.Span(f'  |  Y: {py_label} [{py_min}, {py_max}] {py_unit}'),
+        ], style={'marginBottom': 10, 'padding': 10, 'background': '#f0f3f4',
+                  'borderRadius': 4, 'fontSize': 12}),
+        dcc.Graph(figure=fig, style={'height': '550px'}),
+    ])
+
+
 # 状态点快速查询
 @app.callback(Output('sp-result', 'children'),
               [Input('sp-T', 'value'), Input('sp-P', 'value')])
@@ -767,9 +944,12 @@ def query_state_point(T_val, P_val):
                Input('btn-export-svg', 'n_clicks'),
                Input('btn-export-csv-states', 'n_clicks')],
               [State('cycle-type', 'value'),
-               State('diagram-type', 'value')],
+               State('diagram-type', 'value')] +
+              [State(f"param-{k}-{p['key']}", 'value') 
+               for k in CYCLE_CONFIGS 
+               for p in CYCLE_CONFIGS[k]['params']],
               prevent_initial_call=True)
-def handle_export(n_pdf, n_svg, n_csv, cycle_type, diagram_type):
+def handle_export(n_pdf, n_svg, n_csv, cycle_type, diagram_type, *all_params):
     ctx = callback_context
     if not ctx.triggered:
         raise PreventUpdate
@@ -777,15 +957,28 @@ def handle_export(n_pdf, n_svg, n_csv, cycle_type, diagram_type):
     button_id = ctx.triggered[0]['prop_id'].split('.')[0]
     cfg = CYCLE_CONFIGS[cycle_type]
     
-    # 重建循环
+    # 收集用户实际参数
+    param_dict = {}
+    idx = 0
+    for ck in CYCLE_CONFIGS:
+        for p in CYCLE_CONFIGS[ck]['params']:
+            if ck == cycle_type and idx < len(all_params):
+                if all_params[idx] is not None:
+                    param_dict[p['key']] = all_params[idx]
+                else:
+                    param_dict[p['key']] = p['default']
+            idx += 1
+    
+    # 温度参数转K
     kwargs = {}
-    for p in cfg['params']:
-        if p['key'].startswith('T'):
-            kwargs[p['key']] = p['default'] + 273.15
+    for k, v in param_dict.items():
+        if k.startswith('T_'):
+            kwargs[k] = v + 273.15
         else:
-            kwargs[p['key']] = p['default']
+            kwargs[k] = v
     if 'extra_kwargs' in cfg:
         kwargs.update(cfg['extra_kwargs'])
+    
     cycle = cfg['class'](**kwargs)
     res = cycle.compute()
     
