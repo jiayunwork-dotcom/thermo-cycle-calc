@@ -443,6 +443,14 @@ app.layout = html.Div([
     dcc.Store(id='optimize-progress-store', data=None),
     # 优化运行状态
     dcc.Store(id='optimize-running-store', data=False),
+    # 优化历史记录 (最多10条)
+    dcc.Store(id='optimize-history-store', data=[]),
+    # 当前加载的历史记录ID (None表示显示最新优化结果)
+    dcc.Store(id='optimize-history-current-id', data=None),
+    # 优化历史选择 (用于对比)
+    dcc.Store(id='optimize-history-selection', data=[]),
+    # 对比结果存储
+    dcc.Store(id='optimize-compare-store', data=None),
     
 ], style={'fontFamily': 'PingFang SC, Microsoft YaHei, Arial, sans-serif'})
 
@@ -583,12 +591,17 @@ def _make_serializable(obj):
                Input('diagram-type', 'value'),
                Input('compare-result-store', 'data'),
                Input('optimize-result-store', 'data'),
-               Input('optimize-progress-store', 'data')])
+               Input('optimize-progress-store', 'data'),
+               Input('optimize-history-store', 'data'),
+               Input('optimize-history-current-id', 'data'),
+               Input('optimize-compare-store', 'data')])
 def render_tab(tab, store_data, diagram_type, compare_result,
-               opt_result, opt_progress):
+               opt_result, opt_progress, opt_history, opt_history_current,
+               opt_compare):
     # ====== 优化求解器Tab (独立处理) ======
     if tab == 'tab-optimize':
-        return _render_optimize_tab(opt_result, opt_progress)
+        return _render_optimize_tab(opt_result, opt_progress, opt_history,
+                                     opt_history_current, opt_compare)
     
     # ====== 工况对比Tab (独立处理) ======
     if tab == 'tab-compare':
@@ -2298,8 +2311,168 @@ def export_compare_png(n_clicks, compare_result):
 # 循环优化求解器 - 辅助函数
 # ============================================================
 
-def _render_optimize_tab(opt_result, opt_progress):
+MAX_OPT_HISTORY = 10
+OPT_HISTORY_COLORS = ['#e74c3c', '#3498db', '#27ae60', '#f39c12',
+                      '#8e44ad', '#16a085', '#2c3e50', '#d35400',
+                      '#1abc9c', '#9b59b6']
+
+
+def _generate_opt_history_id():
+    """生成优化历史唯一ID"""
+    return f"opthist_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+
+
+def _render_opt_history_list(opt_history, current_id):
+    """渲染优化历史记录列表 (带勾选框/序号/时间/目标值/加载/删除按钮)"""
+    opt_history = opt_history or []
+    if not opt_history:
+        return html.Div([
+            html.Div('📭 暂无历史记录',
+                    style={'textAlign': 'center', 'padding': 20,
+                           'color': '#95a5a6', 'fontSize': 12})
+        ])
+    
+    children = []
+    for i, hist in enumerate(opt_history):
+        hid = hist['id']
+        result = hist['result']
+        cfg = CYCLE_CONFIGS.get(result.get('cycle_type', ''), {})
+        obj_type = result.get('objective_type', 'eta')
+        best_obj = result.get('best_objective', 0)
+        is_current = (hid == current_id)
+        
+        obj_label = 'η' if obj_type == 'eta' else 'W_net'
+        obj_val_str = (f'{best_obj*100:.2f}%' if obj_type == 'eta'
+                       else f'{best_obj:.2f}')
+        color = OPT_HISTORY_COLORS[i % len(OPT_HISTORY_COLORS)]
+        
+        row = html.Div([
+            html.Div(style={'width': 4, 'background': color,
+                           'borderRadius': 2, 'marginRight': 6}),
+            html.Div([
+                dcc.Checklist(
+                    options=[{'label': '', 'value': hid}],
+                    value=[],
+                    id={'type': 'opt-hist-checkbox', 'index': hid},
+                    style={'display': 'inline-block', 'marginRight': 4,
+                           'marginTop': 2}
+                ),
+                html.Span(f'#{i+1}',
+                         style={'fontSize': 11, 'fontWeight': 'bold',
+                                'color': '#7f8c8d'}),
+            ], style={'width': '52px', 'flexShrink': 0,
+                      'display': 'flex', 'alignItems': 'center'}),
+            html.Div([
+                html.Div([
+                    html.Strong(f'{cfg.get("name", "?")}',
+                               style={'fontSize': 12}),
+                ]),
+                html.Div([
+                    html.Span(f'{obj_label}={obj_val_str}',
+                             style={'fontSize': 11, 'color': '#2c3e50',
+                                    'fontWeight': 'bold'}),
+                ], style={'marginTop': 2}),
+                html.Div([
+                    html.Span(hist.get('created_at', '')[5:16],
+                             style={'fontSize': 10, 'color': '#95a5a6'}),
+                ], style={'marginTop': 2}),
+            ], style={'flex': 1, 'minWidth': 0,
+                      'backgroundColor': '#fff' if not is_current else '#e8daef',
+                      'padding': '4px 6px',
+                      'borderRadius': 4,
+                      'marginRight': 4}),
+            html.Div([
+                html.Button('👁️',
+                           id={'type': 'opt-hist-load', 'index': hid},
+                           title='加载查看', n_clicks=0,
+                           style={'background': 'transparent', 'border': 'none',
+                                  'cursor': 'pointer', 'fontSize': 13,
+                                  'padding': '2px 3px'}),
+                html.Button('🗑️',
+                           id={'type': 'opt-hist-delete', 'index': hid},
+                           title='删除', n_clicks=0,
+                           style={'background': 'transparent', 'border': 'none',
+                                  'cursor': 'pointer', 'fontSize': 13,
+                                  'padding': '2px 3px', 'color': '#e74c3c'}),
+            ], style={'display': 'flex', 'flexDirection': 'column',
+                      'gap': 0, 'flexShrink': 0}),
+        ], style={'display': 'flex', 'alignItems': 'stretch',
+                  'padding': '6px 4px',
+                  'borderBottom': '1px solid #ecf0f1',
+                  'gap': 2})
+        children.append(row)
+    
+    return html.Div(children)
+
+
+def _render_opt_compare_panel(opt_compare):
+    """渲染优化对比面板"""
+    if not opt_compare:
+        return html.Div()
+    
+    items = opt_compare.get('items', [])
+    if not items:
+        return html.Div()
+    
+    fig = go.Figure()
+    for i, item in enumerate(items):
+        result = item['result']
+        gen_best = result.get('generation_best', [])
+        obj_type = result.get('objective_type', 'eta')
+        best_obj = result.get('best_objective', 0)
+        cfg = CYCLE_CONFIGS.get(result.get('cycle_type', ''), {})
+        color = OPT_HISTORY_COLORS[i % len(OPT_HISTORY_COLORS)]
+        
+        x_axis = list(range(len(gen_best)))
+        if obj_type == 'eta':
+            y_vals = [v * 100 for v in gen_best]
+            y_title = '热效率 η (%)'
+            obj_str = f'η={best_obj*100:.2f}%'
+        else:
+            y_vals = gen_best
+            y_title = '净输出功 W_net (kJ/kg)'
+            obj_str = f'W={best_obj:.2f}'
+        
+        cycle_name = cfg.get('name', '?')
+        fig.add_trace(go.Scatter(
+            x=x_axis, y=y_vals, mode='lines',
+            name=f'#{i+1} {cycle_name} [{obj_str}]',
+            line=dict(color=color, width=2),
+        ))
+    
+    fig.update_layout(
+        title=dict(text='📊 收敛过程对比', font=dict(size=14, color='#6c3483')),
+        xaxis_title='进化代数',
+        yaxis_title=y_title,
+        height=300,
+        legend=dict(orientation='h', y=1.02, x=0, font=dict(size=10)),
+        hovermode='x unified',
+        plot_bgcolor='#f8f9fa',
+        margin=dict(l=40, r=20, t=50, b=40),
+    )
+    
+    return html.Div([
+        html.Div([
+            html.Strong('✅ 收敛过程对比',
+                       style={'color': '#6c3483', 'fontSize': 13,
+                              'display': 'block', 'marginBottom': 6}),
+        ]),
+        dcc.Graph(figure=fig, style={'height': '300px'}),
+    ], style={'padding': 12, 'background': '#f5eef8',
+              'border': '1px solid #d7bde2',
+              'borderRadius': 8, 'marginBottom': 12})
+
+
+def _render_optimize_tab(opt_result, opt_progress, opt_history,
+                          opt_history_current, opt_compare):
     """渲染优化求解器Tab"""
+    
+    display_result = opt_result
+    if opt_history_current and opt_history:
+        hist_item = next((h for h in opt_history if h['id'] == opt_history_current), None)
+        if hist_item:
+            display_result = hist_item['result']
+    
     return html.Div([
         html.H3('🎯 循环优化求解器 (遗传算法)',
                 style={'marginTop': 0, 'color': '#935116',
@@ -2313,17 +2486,16 @@ def _render_optimize_tab(opt_result, opt_progress):
                 html.Li('勾选参与优化的参数，设置其上下界（未勾选的参数将使用左侧面板当前值固定不变）'),
                 html.Li('可调整遗传算法参数（种群大小/代数/交叉率/变异率），使用默认值也可'),
                 html.Li('两个固定约束条件: 涡轮出口干度≥0.88、状态点温度不超过工质上限。不满足约束的解将直接淘汰。'),
-                html.Li('点击"开始优化"，等待进度完成后查看最优结果'),
+                html.Li('点击"开始优化"，等待进度完成后查看最优结果。可在右侧"优化历史"面板中查看/对比历史记录。'),
             ], style={'lineHeight': 1.8, 'marginTop': 6, 'marginBottom': 0}),
         ], style={'padding': 16, 'background': '#fef9e7',
                   'borderRadius': 8, 'borderLeft': '4px solid #e67e22',
                   'marginTop': 16, 'marginBottom': 20}),
         
-        # ===== 上半部分: 左侧参数配置 + 右侧进度/控制 =====
+        # ===== 上半部分: 左侧参数配置 + 中间进度/控制 + 右侧历史 =====
         html.Div([
             # ---- 左侧: 参数配置 ----
             html.Div([
-                # 1. 循环类型 + 优化目标
                 html.Div([
                     html.H4('1️⃣ 基本设置', style={'marginTop': 0, 'color': '#935116'}),
                     html.Div([
@@ -2359,7 +2531,6 @@ def _render_optimize_tab(opt_result, opt_progress):
                           'border': '1px solid #d5dbdb',
                           'borderRadius': 8, 'marginBottom': 16}),
                 
-                # 2. 参数上下界设置 (动态根据循环类型渲染)
                 html.Div([
                     html.H4('2️⃣ 参数优化范围',
                             style={'marginTop': 0, 'color': '#935116',
@@ -2371,7 +2542,6 @@ def _render_optimize_tab(opt_result, opt_progress):
                           'border': '1px solid #d5dbdb',
                           'borderRadius': 8, 'marginBottom': 16}),
                 
-                # 3. 遗传算法参数
                 html.Div([
                     html.H4('3️⃣ 遗传算法参数',
                             style={'marginTop': 0, 'color': '#935116',
@@ -2425,7 +2595,6 @@ def _render_optimize_tab(opt_result, opt_progress):
                           'border': '1px solid #d5dbdb',
                           'borderRadius': 8, 'marginBottom': 16}),
                 
-                # 4. 开始按钮
                 html.Div([
                     html.Button('🚀 开始优化', id='btn-run-optimize', n_clicks=0,
                                style={'background': '#e67e22', 'color': 'white',
@@ -2434,41 +2603,47 @@ def _render_optimize_tab(opt_result, opt_progress):
                                       'fontWeight': 'bold', 'cursor': 'pointer',
                                       'width': '100%'}),
                 ]),
-            ], style={'width': '420px', 'flexShrink': 0,
-                      'paddingRight': 20}),
+            ], style={'width': '380px', 'flexShrink': 0,
+                      'paddingRight': 16}),
             
-            # ---- 右侧: 进度 + 结果预览 ----
+            # ---- 中间: 进度 + 保存按钮 + 约束说明 + 对比 ----
             html.Div([
-                # 进度显示
                 html.Div(id='opt-progress-panel',
                          children=_render_opt_progress(opt_progress,
                                                         opt_result is not None),
                          style={'padding': 16, 'background': '#eaf2f8',
                                 'border': '1px solid #aed6f1',
-                                'borderRadius': 8, 'marginBottom': 16,
+                                'borderRadius': 8, 'marginBottom': 12,
                                 'minHeight': '120px'}),
                 
-                # 保存为工况按钮 (静态放置, 始终存在)
                 html.Div([
                     html.Div([
                         html.Button('💾 保存最优解为工况',
                                    id='btn-save-opt-case', n_clicks=0,
-                                   disabled=(opt_result is None or 'error' in opt_result),
-                                   style={'background': '#2980b9' if opt_result and 'error' not in opt_result else '#95a5a6',
+                                   disabled=(display_result is None or 'error' in (display_result or {})),
+                                   style={'background': '#2980b9' if (display_result and 'error' not in display_result) else '#95a5a6',
                                           'color': 'white',
-                                          'border': 'none', 'padding': '10px 20px',
-                                          'borderRadius': 6, 'fontSize': 13,
+                                          'border': 'none', 'padding': '10px 16px',
+                                          'borderRadius': 6, 'fontSize': 12,
                                           'fontWeight': 'bold', 'cursor': 'pointer',
                                           'whiteSpace': 'nowrap', 'width': '100%'}),
                         html.Div(id='opt-save-status',
                                 style={'fontSize': 11, 'marginTop': 6,
                                        'minHeight': '14px', 'textAlign': 'center'}),
-                    ]),
+                    ], style={'marginBottom': 8}),
+                    html.Button('⤴️ 返回最新结果',
+                               id='btn-opt-history-back', n_clicks=0,
+                               disabled=(opt_history_current is None),
+                               style={'background': '#7f8c8d' if opt_history_current else '#bdc3c7',
+                                      'color': 'white',
+                                      'border': 'none', 'padding': '8px 14px',
+                                      'borderRadius': 6, 'fontSize': 12,
+                                      'cursor': 'pointer' if opt_history_current else 'not-allowed',
+                                      'width': '100%'}),
                 ], style={'padding': 14, 'background': '#ebf5fb',
                           'border': '1px solid #aed6f1',
-                          'borderRadius': 8, 'marginBottom': 16}),
+                          'borderRadius': 8, 'marginBottom': 12}),
                 
-                # 约束说明
                 html.Div([
                     html.Strong('📌 固定约束条件 (不满足将淘汰):',
                                style={'color': '#922b21', 'display': 'block',
@@ -2482,19 +2657,76 @@ def _render_optimize_tab(opt_result, opt_progress):
                               'margin': 0, 'paddingLeft': 22}),
                 ], style={'padding': 12, 'background': '#fdedec',
                           'border': '1px solid #f5b7b1',
-                          'borderRadius': 8, 'fontSize': 12}),
-            ], style={'flex': 1}),
+                          'borderRadius': 8, 'fontSize': 12,
+                          'marginBottom': 12}),
+                
+                html.Div(
+                    _render_opt_compare_panel(opt_compare) if opt_compare else html.Div(),
+                    id='opt-compare-panel'
+                ),
+            ], style={'flex': 1, 'paddingRight': 16}),
+            
+            # ---- 右侧: 优化历史面板 ----
+            html.Div([
+                html.Div([
+                    html.H4('📜 优化历史记录',
+                            style={'marginTop': 0, 'color': '#6c3483',
+                                   'marginBottom': 10}),
+                    html.Div([
+                        html.Small(f'最多保存 {MAX_OPT_HISTORY} 条',
+                                   style={'color': '#7f8c8d', 'fontSize': 11}),
+                    ], style={'marginBottom': 8}),
+                    html.Button('📊 对比收敛过程',
+                               id='btn-opt-history-compare', n_clicks=0,
+                               style={'background': '#8e44ad', 'color': 'white',
+                                      'border': 'none', 'padding': '8px 12px',
+                                      'borderRadius': 6, 'fontSize': 12,
+                                      'fontWeight': 'bold', 'cursor': 'pointer',
+                                      'width': '100%', 'marginBottom': 10}),
+                    html.Div(id='opt-history-compare-status',
+                            style={'fontSize': 11, 'marginBottom': 8,
+                                   'minHeight': '14px', 'color': '#c0392b'}),
+                    html.Div(id='opt-history-list',
+                             children=_render_opt_history_list(opt_history,
+                                                                 opt_history_current),
+                             style={'maxHeight': '560px', 'overflowY': 'auto',
+                                    'padding': 4, 'background': '#f8f9fa',
+                                    'borderRadius': 6,
+                                    'border': '1px solid #dee2e6',
+                                    'minHeight': '80px'}),
+                ], style={'padding': 14, 'background': '#f5eef8',
+                          'border': '1px solid #d7bde2',
+                          'borderRadius': 8, 'height': '100%'}),
+            ], style={'width': '300px', 'flexShrink': 0}),
         ], style={'display': 'flex', 'marginBottom': 20}),
         
         # ===== 下半部分: 优化结果展示 =====
         html.Div(id='opt-results-section',
-                 children=_render_opt_results(opt_result) if opt_result else html.Div(
-                     [html.Div('📊 优化完成后将在此处显示结果',
-                              style={'textAlign': 'center',
-                                     'padding': 40,
-                                     'color': '#95a5a6',
-                                     'background': '#f8f9fa',
-                                     'borderRadius': 8})])),
+                 children=(
+                     _render_opt_results(display_result, opt_compare)
+                     if display_result and 'error' not in display_result
+                     else (
+                         html.Div([
+                             html.Div(
+                                 '📊 优化完成后将在此处显示结果 (可从右侧历史记录中加载历史结果)',
+                                 style={'textAlign': 'center',
+                                        'padding': 40,
+                                        'color': '#95a5a6',
+                                        'background': '#f8f9fa',
+                                        'borderRadius': 8})
+                         ])
+                         if not (display_result and 'error' in display_result)
+                         else html.Div([
+                             html.Div(f"❌ 优化错误: {display_result.get('error','未知错误')}",
+                                      style={'textAlign': 'center',
+                                             'padding': 40,
+                                             'color': '#c0392b',
+                                             'background': '#fdecea',
+                                             'borderRadius': 8,
+                                             'fontWeight': 'bold'})
+                         ])
+                     )
+                 )),
     ], style={'padding': 4})
 
 
@@ -2586,8 +2818,8 @@ def _render_opt_progress(opt_progress, finished=False):
     ])
 
 
-def _render_opt_results(opt_result):
-    """渲染优化结果 (最优参数表 + 收敛曲线 + 完整循环结果)"""
+def _render_opt_results(opt_result, opt_compare=None):
+    """渲染优化结果 (最优参数表 + 收敛曲线 + 约束散点图 + 完整循环结果)"""
     cfg_key = opt_result.get('cycle_type', 'rankine_basic')
     cfg = CYCLE_CONFIGS.get(cfg_key, {})
     best_params = opt_result.get('best_params', {})
@@ -2728,22 +2960,57 @@ def _render_opt_results(opt_result):
         y_title = f'{obj_label} (kJ/kg)'
     
     conv_fig = go.Figure()
-    conv_fig.add_trace(go.Scatter(
-        x=x_axis, y=y_best, mode='lines+markers',
-        name='每代最优', line=dict(color='#e67e22', width=2),
-        marker=dict(size=5)
-    ))
-    conv_fig.add_trace(go.Scatter(
-        x=x_axis, y=y_avg, mode='lines',
-        name='每代平均', line=dict(color='#3498db', width=2, dash='dot')
-    ))
+    
+    # 如果有对比数据，叠加多条收敛曲线
+    if opt_compare and opt_compare.get('items'):
+        for i, item in enumerate(opt_compare['items']):
+            c_result = item['result']
+            c_gen_best = c_result.get('generation_best', [])
+            c_obj_type = c_result.get('objective_type', 'eta')
+            c_best_obj = c_result.get('best_objective', 0)
+            c_cfg = CYCLE_CONFIGS.get(c_result.get('cycle_type', ''), {})
+            c_color = OPT_HISTORY_COLORS[i % len(OPT_HISTORY_COLORS)]
+            c_x = list(range(len(c_gen_best)))
+            
+            if c_obj_type == 'eta':
+                c_y = [v * 100 for v in c_gen_best]
+                c_obj_str = f'η={c_best_obj*100:.2f}%'
+            else:
+                c_y = c_gen_best
+                c_obj_str = f'W={c_best_obj:.2f}'
+            
+            c_cycle_name = c_cfg.get('name', '?')
+            conv_fig.add_trace(go.Scatter(
+                x=c_x, y=c_y, mode='lines',
+                name=f'#{i+1} {c_cycle_name} [{c_obj_str}]',
+                line=dict(color=c_color, width=2.5),
+                opacity=0.9,
+            ))
+        # 当前结果用更醒目的样式
+        conv_fig.add_trace(go.Scatter(
+            x=x_axis, y=y_best, mode='lines+markers',
+            name=f'当前结果: {cfg.get("name", cfg_key)} [{"η" if obj_type=="eta" else "W"}={obj_val_str}]',
+            line=dict(color='#e67e22', width=3.5),
+            marker=dict(size=7, symbol='circle'),
+        ))
+    else:
+        conv_fig.add_trace(go.Scatter(
+            x=x_axis, y=y_best, mode='lines+markers',
+            name='每代最优', line=dict(color='#e67e22', width=2),
+            marker=dict(size=5)
+        ))
+        conv_fig.add_trace(go.Scatter(
+            x=x_axis, y=y_avg, mode='lines',
+            name='每代平均', line=dict(color='#3498db', width=2, dash='dot')
+        ))
+    
     conv_fig.update_layout(
-        title=dict(text=f'📈 收敛曲线 - {cfg.get("name", cfg_key)}',
+        title=dict(text=f'📈 收敛曲线{" (对比模式)" if opt_compare and opt_compare.get("items") else ""} - {cfg.get("name", cfg_key)}',
                    font=dict(size=15, color='#935116')),
         xaxis_title='进化代数',
         yaxis_title=y_title,
         height=420,
-        legend=dict(orientation='h', y=1.02, x=0),
+        legend=dict(orientation='h', y=1.02, x=0, font=dict(size=10)),
         hovermode='x unified',
         plot_bgcolor='#f8f9fa',
     )
@@ -2768,11 +3035,152 @@ def _render_opt_results(opt_result):
         yaxis_range=[0, 105],
     )
     
+    # ===== 约束边界可视化散点图 =====
+    pop_history = opt_result.get('population_history', [])
+    constraint_fig = go.Figure()
+    
+    if pop_history:
+        # 按代数分组获取数据
+        gens = sorted(list(set(ph['generation'] for ph in pop_history)))
+        n_gens_total = len(gens) if gens else 1
+        
+        scatter_x = []
+        scatter_y = []
+        scatter_color = []
+        scatter_text = []
+        scatter_params = []
+        
+        for ph in pop_history:
+            gen = ph['generation']
+            obj_val = ph.get('objective_val', 0)
+            x_qual = ph.get('x_quality')
+            params = ph.get('params', {})
+            feasible = ph.get('feasible', False)
+            
+            # 如果没有干度数据 (如燃气循环), 跳过
+            if x_qual is None:
+                continue
+            
+            # 横轴: 热效率(%)或净功
+            if obj_type == 'eta':
+                x_val = obj_val * 100 if obj_val > 0 else 0
+            else:
+                x_val = obj_val if obj_val > 0 else 0
+            
+            scatter_x.append(x_val)
+            scatter_y.append(x_qual)
+            # 颜色: 早期代(低gen)偏浅(黄), 晚期代(高gen)偏深(红/紫)
+            color_ratio = gen / max(n_gens_total - 1, 1)
+            scatter_color.append(gen)
+            
+            # hover文本
+            obj_str = (f'{x_val:.3f}%' if obj_type == 'eta'
+                       else f'{x_val:.3f} kJ/kg')
+            param_strs = []
+            for pk, pv in params.items():
+                p_cfg = next((pp for pp in cfg.get('params', []) if pp['key'] == pk), None)
+                plabel = p_cfg['label'] if p_cfg else pk
+                punit = p_cfg.get('unit', '') if p_cfg else ''
+                param_strs.append(f'{plabel}: {pv:.4g} {punit}'.strip())
+            
+            feasible_str = '✅ 可行' if feasible else '❌ 不可行'
+            hover_text = (
+                f'第 {gen} 代  #{ph.get("individual_idx","")}<br>'
+                f'{obj_label}: {obj_str}<br>'
+                f'涡轮出口干度 x: {x_qual:.4f}<br>'
+                f'状态: {feasible_str}<br>'
+                f'<br>参数:<br>' + '<br>'.join(param_strs)
+            )
+            scatter_text.append(hover_text)
+        
+        if scatter_x:
+            constraint_fig.add_trace(go.Scatter(
+                x=scatter_x,
+                y=scatter_y,
+                mode='markers',
+                marker=dict(
+                    size=6,
+                    color=scatter_color,
+                    colorscale='YlOrRd',
+                    showscale=True,
+                    colorbar=dict(
+                        title='代数',
+                        titleside='right',
+                        thickness=15,
+                        len=0.7,
+                    ),
+                    opacity=0.75,
+                    line=dict(width=0.3, color='white'),
+                ),
+                text=scatter_text,
+                hovertemplate='%{text}<extra></extra>',
+                name='种群个体',
+            ))
+            
+            # 干度约束线 x = 0.88
+            constraint_fig.add_hline(
+                y=MIN_QUALITY,
+                line_dash='dash',
+                line_color='red',
+                line_width=2,
+                annotation_text=f'干度约束 x={MIN_QUALITY}',
+                annotation_position='top right',
+                annotation_font=dict(color='red', size=12, family='Arial'),
+            )
+            
+            # 不可行区域阴影
+            y_min = min(scatter_y) if scatter_y else 0
+            y_max = max(scatter_y) if scatter_y else 1.0
+            y_range_low = max(0, y_min - 0.05)
+            
+            constraint_fig.add_shape(
+                type='rect',
+                x0=min(scatter_x),
+                x1=max(scatter_x),
+                y0=y_range_low,
+                y1=MIN_QUALITY,
+                fillcolor='rgba(231, 76, 60, 0.08)',
+                line=dict(width=0),
+                layer='below',
+            )
+    
+    x_title_scatter = f'{obj_label} (%)' if obj_type == 'eta' else f'{obj_label} (kJ/kg)'
+    constraint_fig.update_layout(
+        title=dict(text='🎯 约束边界可视化: 目标值 vs 涡轮出口干度 (颜色=代数)',
+                   font=dict(size=14, color='#922b21')),
+        xaxis_title=x_title_scatter,
+        yaxis_title='涡轮出口干度 x',
+        yaxis=dict(range=[None, 1.02]),
+        height=420,
+        plot_bgcolor='#fdfefe',
+        hovermode='closest',
+        margin=dict(l=60, r=80, t=60, b=60),
+        showlegend=False,
+    )
+    
+    # 判断是否有散点图数据
+    has_constraint_data = bool(pop_history and any(
+        ph.get('x_quality') is not None for ph in pop_history
+    ))
+    
     convergence_section = html.Div([
-        html.H4('📈 收敛过程', style={'marginTop': 0, 'color': '#935116'}),
+        html.H4('📈 收敛过程与约束可视化', style={'marginTop': 0, 'color': '#935116'}),
         dcc.Graph(id='opt-conv-figure', figure=conv_fig,
                  style={'marginBottom': 8}),
-        dcc.Graph(id='opt-feasibility-figure', figure=feas_fig),
+        dcc.Graph(id='opt-feasibility-figure', figure=feas_fig,
+                 style={'marginBottom': 8}),
+        (dcc.Graph(id='opt-constraint-figure', figure=constraint_fig)
+         if has_constraint_data
+         else html.Div([
+             html.Div('💡 当前循环类型不支持涡轮出口干度约束可视化 (仅水蒸气循环有效)',
+                     style={'textAlign': 'center',
+                            'padding': 30,
+                            'color': '#7f8c8d',
+                            'background': '#fdfefe',
+                            'borderRadius': 8,
+                            'border': '1px dashed #f6b26b',
+                            'fontSize': 13})
+         ])),
     ], style={'padding': 16, 'background': '#fdfefe',
               'border': '1px solid #f6b26b',
               'borderRadius': 8, 'marginBottom': 16})
@@ -3273,6 +3681,208 @@ def _save_optimized_case(n_clicks, opt_result, saved_cases):
                  style={'color': '#27ae60', 'fontSize': 11}),
         ''
     )
+
+
+# ============================================================
+# 优化求解器 - 历史记录管理
+# ============================================================
+
+# ---- 1. 优化完成后自动存入历史记录 ----
+@app.callback(
+    [Output('optimize-history-store', 'data'),
+     Output('optimize-history-current-id', 'data', allow_duplicate=True)],
+    Input('optimize-result-store', 'data'),
+    [State('optimize-history-store', 'data'),
+     State('opt-cycle-type', 'value'),
+     State('opt-objective', 'value'),
+     State('opt-pop-size', 'value'),
+     State('opt-n-gen', 'value'),
+     State('opt-cx-rate', 'value'),
+     State('opt-mut-rate', 'value')],
+    prevent_initial_call=True
+)
+def _save_opt_to_history(new_result, history,
+                         cfg_key, objective,
+                         pop_size, n_gen, cx_rate, mut_rate):
+    """优化完成后自动将结果存入历史记录"""
+    if not new_result or 'error' in new_result:
+        raise PreventUpdate
+    
+    history = history or []
+    
+    # 构建历史记录项
+    hist_id = _generate_opt_history_id()
+    cfg = CYCLE_CONFIGS.get(cfg_key, {})
+    
+    # 收集算法配置
+    algo_config = {
+        'pop_size': pop_size,
+        'n_generations': n_gen,
+        'crossover_rate': cx_rate,
+        'mutation_rate': mut_rate,
+    }
+    
+    # 收集参数范围
+    # 注意: pattern-matching的State不好直接获取，这里从结果中间接获取
+    optimized_keys = new_result.get('optimized_keys', [])
+    param_ranges = {}
+    for pk in optimized_keys:
+        p_cfg = next((p for p in cfg.get('params', []) if p['key'] == pk), None)
+        if p_cfg:
+            param_ranges[pk] = {
+                'min': p_cfg.get('min'),
+                'max': p_cfg.get('max'),
+                'label': p_cfg.get('label', pk),
+            }
+    
+    hist_item = {
+        'id': hist_id,
+        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'cycle_type': cfg_key,
+        'cycle_name': cfg.get('name', cfg_key),
+        'objective': objective,
+        'result': _make_serializable(new_result),
+        'algo_config': algo_config,
+        'param_ranges': param_ranges,
+        'optimized_keys': optimized_keys,
+    }
+    
+    # 添加到历史，超过上限删除最旧的
+    history.append(hist_item)
+    while len(history) > MAX_OPT_HISTORY:
+        history.pop(0)
+    
+    # 新结果加入后，清除当前查看的历史ID（显示最新结果）
+    return history, None
+
+
+# ---- 2. 加载历史记录查看 ----
+@app.callback(
+    Output('optimize-history-current-id', 'data', allow_duplicate=True),
+    Input({'type': 'opt-hist-load', 'index': ALL}, 'n_clicks'),
+    prevent_initial_call=True
+)
+def _load_opt_history(load_clicks):
+    ctx = callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
+    
+    triggered = ctx.triggered[0]
+    if float(triggered.get('value', 0)) == 0:
+        raise PreventUpdate
+    
+    try:
+        import json as _json
+        prop_id = triggered['prop_id']
+        id_dict = _json.loads(prop_id.split('.')[0])
+        hist_id = id_dict.get('index')
+    except:
+        raise PreventUpdate
+    
+    return hist_id
+
+
+# ---- 3. 删除单条历史记录 ----
+@app.callback(
+    Output('optimize-history-store', 'data', allow_duplicate=True),
+    Input({'type': 'opt-hist-delete', 'index': ALL}, 'n_clicks'),
+    [State('optimize-history-store', 'data'),
+     State('optimize-history-current-id', 'data')],
+    prevent_initial_call=True
+)
+def _delete_opt_history(delete_clicks, history, current_id):
+    ctx = callback_context
+    if not ctx.triggered or not history:
+        raise PreventUpdate
+    
+    triggered = ctx.triggered[0]
+    if float(triggered.get('value', 0)) == 0:
+        raise PreventUpdate
+    
+    try:
+        import json as _json
+        prop_id = triggered['prop_id']
+        id_dict = _json.loads(prop_id.split('.')[0])
+        delete_id = id_dict.get('index')
+    except:
+        raise PreventUpdate
+    
+    new_history = [h for h in history if h['id'] != delete_id]
+    return new_history
+
+
+# ---- 4. 返回最新结果 ----
+@app.callback(
+    Output('optimize-history-current-id', 'data', allow_duplicate=True),
+    Input('btn-opt-history-back', 'n_clicks'),
+    prevent_initial_call=True
+)
+def _back_to_latest_opt(back_clicks):
+    if back_clicks == 0:
+        raise PreventUpdate
+    return None
+
+
+# ---- 5. 优化历史选择状态同步 (勾选框) ----
+@app.callback(
+    Output('optimize-history-selection', 'data'),
+    Input({'type': 'opt-hist-checkbox', 'index': ALL}, 'value'),
+    [State('optimize-history-selection', 'data'),
+     State('optimize-history-store', 'data')],
+    prevent_initial_call=False
+)
+def _sync_opt_history_selection(checkbox_values, current_selection, history):
+    ctx = callback_context
+    if not ctx.triggered:
+        return current_selection or []
+    
+    history = history or []
+    valid_ids = {h['id'] for h in history}
+    new_selection = []
+    
+    for vals in checkbox_values:
+        if isinstance(vals, list):
+            for v in vals:
+                if v in valid_ids and v not in new_selection:
+                    new_selection.append(v)
+    
+    return new_selection
+
+
+# ---- 6. 对比收敛过程 ----
+@app.callback(
+    [Output('optimize-compare-store', 'data'),
+     Output('opt-history-compare-status', 'children')],
+    Input('btn-opt-history-compare', 'n_clicks'),
+    [State('optimize-history-store', 'data'),
+     State('optimize-history-selection', 'data')],
+    prevent_initial_call=True
+)
+def _compare_opt_history(compare_clicks, history, selection):
+    if compare_clicks == 0:
+        raise PreventUpdate
+    
+    history = history or []
+    selection = selection or []
+    selected = [h for h in history if h['id'] in selection]
+    n_selected = len(selected)
+    
+    if n_selected < 2 or n_selected > 4:
+        return None, html.Span(f'❌ 请勾选2~4条历史记录 (当前{n_selected}条)',
+                               style={'color': '#c0392b'})
+    
+    # 检查目标类型是否一致 (可选: 允许不同目标对比，但用户可能期望一致)
+    # 这里我们允许不同，但在图例中会标注清楚
+    
+    compare_result = {
+        'items': selected,
+        'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    
+    return compare_result, ''
+
+
+# ---- 7. 清除对比结果 (可选: 不单独做按钮，切换历史时自动) ----
 
 
 # ============================================================

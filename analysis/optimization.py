@@ -173,6 +173,10 @@ class GeneticOptimizer:
         
         # 统计违规情况
         self.valid_count_per_gen = []
+        
+        # 每代所有个体数据 (用于约束可视化)
+        # 每项: list of dict {generation, objective_val, x_quality, feasible, params}
+        self.population_history = []
     
     def _init_population(self):
         """初始化种群 - 在参数范围内均匀随机采样"""
@@ -198,7 +202,8 @@ class GeneticOptimizer:
     def _evaluate(self, individual):
         """
         评估单个个体
-        返回: fitness (违约个体为0), 计算结果或None, 是否满足约束
+        返回: fitness (违约个体为0), 计算结果或None, 是否满足约束, 违规列表, 附加数据
+        附加数据: {objective_val, x_quality, param_dict}
         """
         param_dict = self._decode(individual)
         
@@ -207,21 +212,33 @@ class GeneticOptimizer:
                 self.cfg_key, param_dict, self.CYCLE_CONFIGS
             )
         except Exception as e:
-            return 0.0, None, False, [str(e)]
+            extra = {
+                'objective_val': 0.0,
+                'x_quality': None,
+                'param_dict': param_dict,
+            }
+            return 0.0, None, False, [str(e)], extra
         
         feasible, violations = _check_constraints(
             self.cfg_key, cycle, results, self.CYCLE_CONFIGS
         )
         
-        if not feasible:
-            return 0.0, results, False, violations
-        
         obj_val = _get_objective_value(results, self.objective)
+        x_quality = results.get('x_turbine_out')
+        
+        extra = {
+            'objective_val': obj_val,
+            'x_quality': x_quality,
+            'param_dict': param_dict,
+        }
+        
+        if not feasible:
+            return 0.0, results, False, violations, extra
         
         # 适应度: 目标值必须为正
         fitness = max(obj_val, 1e-10)
         
-        return fitness, results, True, []
+        return fitness, results, True, [], extra
     
     def _tournament_selection(self, population, fitnesses, tournament_size=3):
         """锦标赛选择"""
@@ -264,6 +281,19 @@ class GeneticOptimizer:
             individual[i] = np.clip(individual[i], lb, ub)
         return individual
     
+    def _record_population(self, gen_idx, population, fitnesses, valid_flags, extras_list):
+        """记录某一代所有个体的数据到population_history"""
+        for i in range(self.pop_size):
+            extra = extras_list[i] or {}
+            self.population_history.append({
+                'generation': gen_idx,
+                'individual_idx': i,
+                'objective_val': float(extra.get('objective_val', fitnesses[i])),
+                'x_quality': extra.get('x_quality'),
+                'feasible': bool(valid_flags[i]),
+                'params': extra.get('param_dict', {}),
+            })
+    
     def run(self):
         """运行遗传算法"""
         if len(self.opt_params) == 0:
@@ -278,9 +308,10 @@ class GeneticOptimizer:
         fitnesses = np.zeros(self.pop_size)
         valid_flags = np.zeros(self.pop_size, dtype=bool)
         results_cache = [None] * self.pop_size
+        extras_cache = [None] * self.pop_size
         
         for i in range(self.pop_size):
-            fitnesses[i], results_cache[i], valid_flags[i], _ = self._evaluate(population[i])
+            fitnesses[i], results_cache[i], valid_flags[i], _, extras_cache[i] = self._evaluate(population[i])
         
         best_idx = int(np.argmax(fitnesses))
         self.best_individual = population[best_idx].copy()
@@ -290,6 +321,9 @@ class GeneticOptimizer:
         self.generation_best.append(float(self.best_fitness))
         self.generation_avg.append(float(np.mean(fitnesses)))
         self.valid_count_per_gen.append(int(np.sum(valid_flags)))
+        
+        # 记录第0代种群历史
+        self._record_population(0, population, fitnesses, valid_flags, extras_cache)
         
         # 回调 - 初始代数
         if self.progress_callback:
@@ -301,12 +335,20 @@ class GeneticOptimizer:
             new_fitnesses = np.zeros(self.pop_size)
             new_valid = np.zeros(self.pop_size, dtype=bool)
             new_results = [None] * self.pop_size
+            new_extras = [None] * self.pop_size
             
             # 精英策略: 保留最佳个体
             new_population[0] = self.best_individual.copy()
             new_fitnesses[0] = self.best_fitness
             new_valid[0] = True
             new_results[0] = self.best_results
+            # 精英个体的extra数据
+            new_extras[0] = {
+                'objective_val': float(self.best_fitness),
+                'x_quality': (self.best_results.get('x_turbine_out')
+                              if self.best_results else None),
+                'param_dict': self._decode(self.best_individual),
+            }
             
             # 产生剩余个体
             for i in range(1, self.pop_size, 2):
@@ -327,17 +369,18 @@ class GeneticOptimizer:
                 
                 # 评估
                 new_population[i] = child1
-                new_fitnesses[i], new_results[i], new_valid[i], _ = self._evaluate(child1)
+                new_fitnesses[i], new_results[i], new_valid[i], _, new_extras[i] = self._evaluate(child1)
                 
                 if i + 1 < self.pop_size:
                     new_population[i + 1] = child2
-                    new_fitnesses[i + 1], new_results[i + 1], new_valid[i + 1], _ = self._evaluate(child2)
+                    new_fitnesses[i + 1], new_results[i + 1], new_valid[i + 1], _, new_extras[i + 1] = self._evaluate(child2)
             
             # 更新种群
             population = new_population
             fitnesses = new_fitnesses
             valid_flags = new_valid
             results_cache = new_results
+            extras_cache = new_extras
             
             # 更新最优
             current_best_idx = int(np.argmax(fitnesses))
@@ -349,6 +392,9 @@ class GeneticOptimizer:
             self.generation_best.append(float(self.best_fitness))
             self.generation_avg.append(float(np.mean(fitnesses)))
             self.valid_count_per_gen.append(int(np.sum(valid_flags)))
+            
+            # 记录当代种群历史
+            self._record_population(gen, population, fitnesses, valid_flags, extras_cache)
             
             # 进度回调
             if self.progress_callback:
@@ -374,4 +420,5 @@ class GeneticOptimizer:
             'best_results': self.best_results,
             'n_generations': self.n_generations,
             'pop_size': self.pop_size,
+            'population_history': self.population_history,
         }
